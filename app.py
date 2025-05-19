@@ -180,12 +180,114 @@ class User(db.Model):
         def is_following(self, user):
             """Checking if following a user is True"""
             return self.following.filter(followers.c.followed_id == user.id).count() > 0
+class Post(db.model):
+    id = db.Column(db.integer, primary_key=True)
+    content = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = db.column(db.DateTime(timezone=True),onupdate = lambda: datetime.now(timezone.utc))
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+    media_url = db.Column(db.String(255), nullable=True)
+    media_type = db.Column(db.String(20), default='public')
+
+    # Relationships
+    likes = db.relationship('like', backref='post', lazy='dynamic', cascade='all, delete-orphan')
+    comments = db.relationship('comment', backref='post', lazy='dynamic', cascade='all, delete-orphan')
+
+class Comment(db.model):
+    id = db.Column(db.Integer, primary_key=True)
+    content = db.Column(db.Text, nullable = False)
+    created_at = db.Column(db.DateTime(timezone = True), default = lambda: datetime.now(timezone.utc))
+    user_id = db.Column(db.Ineger,db.ForeignKey('user.id'), nullable=False)
+    post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable = False)
+
+class Relationship(db.model):
+    id = db.Column(db.Integer, primary_key=True)
+    follower_id= db.Column(db.Integer, db.ForeignKey('user.id'), nullable = False)
+    followed_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable = False)
+    timestamp = db.Column(db.DateTime(timezone = True), default=lambda: datetime.now(timezone.utc))
+    status = db.Column(db.String(20), default = 'pending', nullable = False)
+
+    # relationships
+    follower = db.relationship('User', foreign_keys= [follower_id], backref = db.backref('following', lazy = 'dynamic'))
+    followed = db.relationship('User', foreign_keys= [followed_id], backref = db.backref('followers', lazy = 'dynamic'))
+
+    def __repr__(self):
+        return f"<Relationship follower_id = {self.follower_id} followed_id={self.followed_id} status = {self.status}>"
+
+class Like(db.model):
+    id = db.Column(db.Integer, primary_key = True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable = False) # the user who likes the post
+    post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable = False) # the post that was liked
+    created_at = db.Column(db.DateTime(timezone = True), default = lambda: datetime.now(timezone.utc)) # when the like was created
+
+    # relationships
+    user = db.relationship('User', backref=db.backref('likes', lazy='dynamic'))
+    post = db.relationship('Post', backref=db.backref('likes', lazy='dynamic'))
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'post_id', name='unique_user_post_like'),
+
+    )
+
+    def __repr__(self):
+        return f"Like user_id={self.user_id} post_id={self.post_id} timestamp={self.timestamp}>"
+
+class Notification(db.model):
+    __tablename__ = 'Notifications'
+
+    id =  db.Column(db.Integer, primary_key = True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False) # user who receive the notification
+    actor_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable = False) # User who caused the notification
+    notification_type = db.Column(db.String(50), nullable = False) # type of notification like, comment, follow
+    target_id = db.Column(db.Integer, nullable=True)
+    target_type = db.Column(db.String(50), nullable = True)
+    message = db.Column(db.String(255), nullable = True)
+    is_read = db.Column(db.Boolean, default = False, nullable = False)
+    created_at = db.Column(db.DateTime(timezone = True), default =  lambda: datetime.now(timezone.utc))
+
+    # Relationship for easy navigation
+    user = db.relationship('User', foreign_keys=[user_id], backref = db.backref('notifications', lazy = 'dynamic'))
+    actor = db.relationship('User', foreign_keys = [actor_id])
+
+    def __repr__(self):
+        return f"<Notification id={self.id} user_id{self.user_id} type = {self.notification_type} read = {self.is_read}>"
 
 
+class Message(db.model):
+    id = db.Column(db.Integer, primary_key = True)
+    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'),nullable = False)
+    recipient_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    content = db.Column(db.Text, nullable = False)
+    timestamp = db.Column(db.DateTime(timezone = True), default = lambda: datetime.now(timezone.utc))
+    is_read = db.Column(db.Boolean, default = False, nullable = False)
+
+    # relationships for easier access to sender and receipient user objects
+    sender = db.relationship('User', foreign_keys=[sender_id], backref=db.backref('sent_messages', lazy='dynamic'))
+    recipient = db.relationship('User', foreign_keys=[recipient_id], backref=db.backref('received_messages', lazy='dynamic'))
 
 
+    def __repr__(self):
+        return f"<Message id ={self.id} sender_id = {self.sender_id} recipient_id = {self.recipiemt_id} read = {self.is_read}>"
+
+class MediaFile(db.model):
+    id = db.Column(db.Integer, primary_key = True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable = False)
+    post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable = True)
+    message_id = db.Column(db.Integer, db.ForeignKey('message.id'), nullable = True)
+    filename = db.Column(db.String(255), nullable = False)
+    media_type = db.Column(db.String(50), nullable = False)
+    size = db.Column(db.Integer, nullable = True)
+    upload_time = db.Column(db.DateTime(timezone = True), default = lambda: datetime.now(timezone.utc))
+    description = db.Column(db.String(255), nullable = True)
 
 
+    # Relationship for easy access and cascading deletes if needed
+    user = db.relationship('User', backref=db.backref('media_files', lazy='dynamic'))
+    post = db.relationship ('Post', backref = db.backref('media_files',lazy = 'dynamic'))
+    message = db.relationship('message', backref=db.backref('media_files', lazy='dynamic'))
 
 
+    def __repr__(self):
+        return f"<MediaFile id={self.id} filename{self.filename} media_type = {self.media_type} user_id = {self.user_id}>"
 
