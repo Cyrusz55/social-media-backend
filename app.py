@@ -490,3 +490,720 @@ class RegisterUser(Resource):
         except Exception as e:
             db.session.rollback()
             return {'message': f'An error occurred: {str(e)}'}, 500
+
+# profile model for the API
+profile_model = users_ns.model('UserProfile', {
+    'Username': fields.String(description='Username'),
+    'first_name': fields.String(description = 'First name'),
+    'last_name': fields.String(description = 'Last name', required=False),
+    'bio': fields.String(description = 'User biography', required=False),
+    'location': fields.String(description = 'User location', required=False),
+    'website': fields.String(description = 'User website', required=False),
+    'profile_picture': fields.String(description = 'URL to profile picture', required=False),
+    'followers_count': fields.Integer(description = 'Number of followers'),
+    'following_count': fields.Integer(description = 'Number of users being followed'),
+    'posts_count': fields.Integer(description = 'Number of posts created'),
+    'date_joined': fields.DateTime(description = 'Date user joined'),
+    'is_private': fields.Boolean(description = 'whether the user profile is private')
+})
+
+# profile update model
+profile_update_model = users_ns.model('ProfileUpdate',{
+    'first_name': fields.String(description = 'First name', required=False),
+    'last_name': fields.String(description = 'Last name', required = False),
+    'bio': fields.String(description = 'User biography', required=False),
+    'location': fields.String(description='User location', required=False),
+    'website': fields.String(description = 'User website', required=False)
+})
+
+# privacy settings model
+
+privacy_settings_model = users_ns.model('PrivacySettings',{
+    'is_private': fields.Boolean(description = 'Where the profile is private'),
+    'allow_messages': fields.Boolean(description = 'Whether to allow direct messages')
+})
+
+# Follow request model
+follow_model = users_ns.model('FollowRequest', {
+    'user_id': fields.Integer(description='ID of the user to follow/unfollow')
+})
+
+user_search_model = users_ns.model('UserSearch',{
+    'query': fields.String(description = 'search term'),
+    'page': fields.Integer(description = 'Page number', required=False, default = 1),
+    'per_page': fields.Integer(description = 'Results per page', required = False, default=20)
+})
+
+# basic user info model
+
+user_info_model = users_ns.model('UserInfo', {
+    'id': fields.Integer(description='User ID'),
+    'Username': fields.String(description='Username'),
+    'first_name': fields.String(description='First name'),
+    'last_name': fields.String(description='Last name', required = False),
+    'Profile_picture': fields.String(description = 'URL to profile picture', required=False),
+    'is_private': fields.Boolean(description='Whether the user profile is private'),
+    'is_following': fields.Boolean(description = 'Whether the current user is following this user'),
+    'is_followed_by': fields.Boolean(description = 'whether this user is following the current user')
+})
+
+users_list_model = users_ns.model('UsersList', {
+    'users': fields.List(fields.Nested(user_info_model)),
+    'total': fields.Integer(description='Total number of results'),
+    'page': fields.Integer(description='Current page number'),
+    'pages': fields.Integer(description='Total number of pages'),
+    'per_page': fields.Integer(description='Results per page')
+})
+
+
+@users_ns.route('/profile')
+class UserProfile(Resource):
+    @jwt_required()
+    @users_ns.marshal_with(profile_model)
+    def get(self):
+        """Get current user's profile"""
+        current_user_id = get_jwt_identity()
+        user = User.query.get_or_404(current_user_id)
+
+        # calculate counts
+        followers_count = user.followers.count()
+        following_count = user.following.count()
+        posts_count = user.posts.count()
+
+        # prepare response
+        response = {
+            'username': user.username,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'bio': user.bio,
+            'location': user.location,
+            'website': user.website,
+            'profile_picture': user.profile_picture,
+            'followers_count': followers_count,
+            'following_count': following_count,
+            'posts_count': posts_count,
+            'date_joined': user.date_joined,
+            'is_private': user.is_private
+
+        }
+
+        return response
+
+    @jwt_required()
+    @users_ns.expect(profile_update_model)
+    @users_ns.marshal_with(profile_model)
+    def put(self):
+        """Update current user's profile"""
+        current_user_id = get_jwt_identity()
+        user = User.query.get_or_404(current_user_id)
+        data = request.json
+
+        # Update fields if provided
+        if 'first_name' in data:
+            user.first_name = data['first_name']
+        if 'last_name' in data:
+            user.last_name = data['last_name']
+        if 'bio' in data:
+            user.bio = data['bio']
+        if 'location' in data:
+            user.location = data['location']
+        if 'website' in data:
+            user.website = data['website']
+
+        try:
+            db.session.commit()
+
+            # Calculate counts for response
+            followers_count = user.followers.count()
+            following_count = user.following.count()
+            posts_count = user.posts.count()
+
+            # Prepare response
+            response = {
+                'username': user.username,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'bio': user.bio,
+                'location': user.location,
+                'website': user.website,
+                'profile_picture': user.profile_picture,
+                'followers_count': followers_count,
+                'following_count': following_count,
+                'posts_count': posts_count,
+                'date_joined': user.date_joined,
+                'is_private': user.is_private
+            }
+
+            return response
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+@users_ns.route('.profile/<int:user_id>')
+class UserProfileById(Resource):
+    @jwt_required(optional = True)
+    @users_ns.marshal_with(profile_model)
+    def get(self, user_id):
+        """Get a user's profile by ID"""
+        current_user_id = get_jwt_identity()
+        user = User.query.get_or_404(user_id)
+
+        # check if profile is private and not followed by current user
+        if user.is_private and current_user_id:
+            current_user = User.query.get(current_user_id)
+            if current_user and not current_user.is_following(user) and current_user_id != user_id:
+                return {'message': 'This profile is private'}, 401
+        elif user.is_private and not current_user_id:
+            return {'message': 'This profile is private'}, 403
+
+        # Calculate counts
+        followers_count = user.followers.count()
+        following_count = user.following.count()
+        posts_count = user.posts.count()
+
+        # Prepare response
+        response = {
+            'username': user.username,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'bio': user.bio,
+            'location': user.location,
+            'website': user.website,
+            'profile_picture': user.profile_picture,
+            'followers_count': followers_count,
+            'following_count': following_count,
+            'posts_count': posts_count,
+            'date_joined': user.date_joined,
+            'is_private': user.is_private
+        }
+
+        return response
+
+@users_ns.route('privacy')
+class PrivacySettings(Resource):
+    @jwt_required()
+    @users_ns.marshal_with(privacy_settings_model)
+    def get(self):
+        """Get current user;s privacy settings"""
+        current_user_id = get_jwt_identity()
+        user = User.query.get_or_404(current_user_id)
+
+        return{
+            'is_private': user.is_private,
+            'allow_messages': user.allow_messages
+        }
+    @jwt_required()
+    @users_ns.expect(privacy_settings_model)
+    @users_ns.marshal_with(privacy_settings_model)
+    def put(self):
+        """Update current user's privacy settings"""
+        current_user_id = get_jwt_identity()
+        user = User.query.get_or_404(current_user_id)
+        data = request.json
+
+        if 'is_private' in data:
+            user.is_private = data['is_private']
+        if 'allow_messages' in data:
+            user.allow_messages = data['allow_messages']
+
+        try:
+            db.session.commit()
+            return {
+                'is_private': user.is_private,
+                'allow_messages': user.allow_messages
+            }
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occured: {str(e)}'}, 500
+
+
+@users_ns.route('/follow')
+class FollowUser(Resource):
+    @jwt_required()
+    @users_ns.expect(follow_model)
+    def post(self):
+        """Follow a user"""
+        current_user_id = get_jwt_identity()
+        current_user = User.query.get_or_404(current_user_id)
+
+        target_user_id = request.json.get('user_id')
+        if not target_user_id:
+            return {'message': 'User ID is required'}, 400
+
+        target_user = User.query.get_or_404(target_user_id)
+
+        # Check if trying to follow self
+        if current_user_id == target_user_id:
+            return {'message': 'Cannot follow yourself'}, 400
+
+        # Check if already following
+        if current_user.is_following(target_user):
+            return {'message': 'Already following this user'}, 409
+
+        # Check if target user is private - create a pending request
+        if target_user.is_private:
+            existing_request = Relationship.query.filter_by(
+                follower_id=current_user_id,
+                followed_id=target_user_id,
+                status='pending'
+            ).first()
+
+            if existing_request:
+                return {'message': 'Follow request already sent'}, 409
+
+            new_request = Relationship(
+                follower_id=current_user_id,
+                followed_id=target_user_id,
+                status='pending'
+            )
+
+            try:
+                db.session.add(new_request)
+                db.session.commit()
+
+                # Create notification for follow request
+                notification = Notification(
+                    user_id=target_user_id,
+                    actor_id=current_user_id,
+                    notification_type='follow_request',
+                    message=f"{current_user.username} wants to follow you"
+                )
+                db.session.add(notification)
+                db.session.commit()
+
+                return {'message': 'Follow request sent'}, 200
+            except Exception as e:
+                db.session.rollback()
+                return {'message': f'An error occurred: {str(e)}'}, 500
+        else:
+            # If user is public, follow directly
+            if current_user.follow(target_user):
+                try:
+                    db.session.commit()
+
+                    # Create notification for new follower
+                    notification = Notification(
+                        user_id=target_user_id,
+                        actor_id=current_user_id,
+                        notification_type='follow',
+                        message=f"{current_user.username} started following you"
+                    )
+                    db.session.add(notification)
+                    db.session.commit()
+
+                    return {'message': 'Successfully followed user'}, 200
+                except Exception as e:
+                    db.session.rollback()
+                    return {'message': f'An error occurred: {str(e)}'}, 500
+            else:
+                return {'message': 'Unable to follow user'}, 400
+
+
+@users_ns.route('/unfollow')
+class UnfollowUser(Resource):
+    @jwt_required()
+    @users_ns.expect(follow_model)
+    def post(self):
+        """Unfollow a user"""
+        current_user_id = get_jwt_identity()
+        current_user = User.query.get_or_404(current_user_id)
+
+        target_user_id = request.json.get('user_id')
+        if not target_user_id:
+            return {'message': 'User ID is required'}, 400
+
+        target_user = User.query.get_or_404(target_user_id)
+
+        # Check if already not following
+        if not current_user.is_following(target_user):
+            # Check if there's a pending request to cancel
+            pending_request = Relationship.query.filter_by(
+                follower_id=current_user_id,
+                followed_id=target_user_id,
+                status='pending'
+            ).first()
+
+            if pending_request:
+                try:
+                    db.session.delete(pending_request)
+                    db.session.commit()
+                    return {'message': 'Follow request canceled'}, 200
+                except Exception as e:
+                    db.session.rollback()
+                    return {'message': f'An error occurred: {str(e)}'}, 500
+            else:
+                return {'message': 'Not following this user'}, 400
+
+        # Unfollow the user
+        if current_user.unfollow(target_user):
+            try:
+                db.session.commit()
+                return {'message': 'Successfully unfollowed user'}, 200
+            except Exception as e:
+                db.session.rollback()
+                return {'message': f'An error occurred: {str(e)}'}, 500
+        else:
+            return {'message': 'Unable to unfollow user'}, 400
+
+
+@users_ns.route('/follow-requests')
+class FollowRequests(Resource):
+    @jwt_required()
+    @users_ns.marshal_with(users_list_model)
+    def get(self):
+        """Get list of pending follow requests"""
+        current_user_id = get_jwt_identity()
+
+        # Get pending follow requests
+        pending_requests = Relationship.query.filter_by(
+            followed_id=current_user_id,
+            status='pending'
+        ).all()
+
+        results = []
+        for request in pending_requests:
+            requester = User.query.get(request.follower_id)
+            if requester:
+                results.append({
+                    'id': requester.id,
+                    'username': requester.username,
+                    'first_name': requester.first_name,
+                    'last_name': requester.last_name,
+                    'profile_picture': requester.profile_picture,
+                    'is_private': requester.is_private,
+                    'is_following': False,  # They requested to follow you
+                    'is_followed_by': False  # You haven't accepted yet
+                })
+
+        return {
+            'users': results,
+            'total': len(results),
+            'page': 1,
+            'pages': 1,
+            'per_page': len(results)
+        }
+
+
+@users_ns.route('/accept-follow')
+class AcceptFollow(Resource):
+    @jwt_required()
+    @users_ns.expect(follow_model)
+    def post(self):
+        """Accept a follow request"""
+        current_user_id = get_jwt_identity()
+
+        follower_id = request.json.get('user_id')
+        if not follower_id:
+            return {'message': 'User ID is required'}, 400
+
+        # Find the pending request
+        pending_request = Relationship.query.filter_by(
+            follower_id=follower_id,
+            followed_id=current_user_id,
+            status='pending'
+        ).first()
+
+        if not pending_request:
+            return {'message': 'No pending follow request found'}, 404
+
+        try:
+            # Update the request status
+            pending_request.status = 'accepted'
+
+            # Create the follow relationship
+            follower = User.query.get(follower_id)
+            current_user = User.query.get(current_user_id)
+
+            if not follower or not current_user:
+                return {'message': 'User not found'}, 404
+
+            if not follower.is_following(current_user):
+                follower.follow(current_user)
+
+            db.session.commit()
+
+            # Create notification for request acceptance
+            notification = Notification(
+                user_id=follower_id,
+                actor_id=current_user_id,
+                notification_type='follow_accepted',
+                message=f"{current_user.username} accepted your follow request"
+            )
+            db.session.add(notification)
+            db.session.commit()
+
+            return {'message': 'Follow request accepted'}, 200
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+
+@users_ns.route('/reject-follow')
+class RejectFollow(Resource):
+    @jwt_required()
+    @users_ns.expect(follow_model)
+    def post(self):
+        """Reject a follow request"""
+        current_user_id = get_jwt_identity()
+
+        follower_id = request.json.get('user_id')
+        if not follower_id:
+            return {'message': 'User ID is required'}, 400
+
+        # Find the pending request
+        pending_request = Relationship.query.filter_by(
+            follower_id=follower_id,
+            followed_id=current_user_id,
+            status='pending'
+        ).first()
+
+        if not pending_request:
+            return {'message': 'No pending follow request found'}, 404
+
+        try:
+            # Delete the request
+            db.session.delete(pending_request)
+            db.session.commit()
+
+            return {'message': 'Follow request rejected'}, 200
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+
+@users_ns.route('/followers')
+class Followers(Resource):
+    @jwt_required(optional=True)
+    @users_ns.doc(params={'user_id': 'User ID (optional, defaults to current user)', 'page': 'Page number',
+                          'per_page': 'Results per page'})
+    @users_ns.marshal_with(users_list_model)
+    def get(self):
+        """Get list of user's followers"""
+        current_user_id = get_jwt_identity()
+
+        # Get query parameters
+        user_id = request.args.get('user_id', current_user_id, type=int)
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+
+        user = User.query.get_or_404(user_id)
+
+        # Check privacy if not the current user
+        if user.is_private and current_user_id != user_id:
+            if not current_user_id:
+                return {'message': 'This profile is private'}, 403
+
+            current_user = User.query.get(current_user_id)
+            if not current_user.is_following(user):
+                return {'message': 'This profile is private'}, 403
+
+        # Paginate followers
+        pagination = user.followers.paginate(page=page, per_page=per_page)
+
+        results = []
+        for follower in pagination.items:
+            # Check if current user is following this follower
+            is_following = False
+            is_followed_by = False
+
+            if current_user_id:
+                current_user = User.query.get(current_user_id)
+                if current_user:
+                    is_following = current_user.is_following(follower)
+                    is_followed_by = follower.is_following(current_user)
+
+            results.append({
+                'id': follower.id,
+                'username': follower.username,
+                'first_name': follower.first_name,
+                'last_name': follower.last_name,
+                'profile_picture': follower.profile_picture,
+                'is_private': follower.is_private,
+                'is_following': is_following,
+                'is_followed_by': is_followed_by
+            })
+
+        return {
+            'users': results,
+            'total': pagination.total,
+            'page': pagination.page,
+            'pages': pagination.pages,
+            'per_page': pagination.per_page
+        }
+
+
+@users_ns.route('/following')
+class Following(Resource):
+    @jwt_required(optional=True)
+    @users_ns.doc(params={'user_id': 'User ID (optional, defaults to current user)', 'page': 'Page number',
+                          'per_page': 'Results per page'})
+    @users_ns.marshal_with(users_list_model)
+    def get(self):
+        """Get list of users followed by a user"""
+        current_user_id = get_jwt_identity()
+
+        # Get query parameters
+        user_id = request.args.get('user_id', current_user_id, type=int)
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+
+        user = User.query.get_or_404(user_id)
+
+        # Check privacy if not the current user
+        if user.is_private and current_user_id != user_id:
+            if not current_user_id:
+                return {'message': 'This profile is private'}, 403
+
+            current_user = User.query.get(current_user_id)
+            if not current_user.is_following(user):
+                return {'message': 'This profile is private'}, 403
+
+        # Paginate following
+        pagination = user.following.paginate(page=page, per_page=per_page)
+
+        results = []
+        for followed in pagination.items:
+            # Check if current user is following this user
+            is_following = False
+            is_followed_by = False
+
+            if current_user_id:
+                current_user = User.query.get(current_user_id)
+                if current_user:
+                    is_following = current_user.is_following(followed)
+                    is_followed_by = followed.is_following(current_user)
+
+            results.append({
+                'id': followed.id,
+                'username': followed.username,
+                'first_name': followed.first_name,
+                'last_name': followed.last_name,
+                'profile_picture': followed.profile_picture,
+                'is_private': followed.is_private,
+                'is_following': is_following,
+                'is_followed_by': is_followed_by
+            })
+
+        return {
+            'users': results,
+            'total': pagination.total,
+            'page': pagination.page,
+            'pages': pagination.pages,
+            'per_page': pagination.per_page
+        }
+
+
+@search_ns.route('/users')
+class SearchUsers(Resource):
+    @jwt_required(optional=True)
+    @search_ns.doc(params={'q': 'Search query', 'page': 'Page number', 'per_page': 'Results per page'})
+    @search_ns.marshal_with(users_list_model)
+    def get(self):
+        """Search for users by username or name"""
+        current_user_id = get_jwt_identity()
+
+        # Get query parameters
+        query = request.args.get('q', '')
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+
+        if not query:
+            return {'message': 'Search query is required'}, 400
+
+        # Search users with LIKE operator
+        search_query = f"%{query}%"
+        users_query = User.query.filter(
+            db.or_(
+                User.username.ilike(search_query),
+                User.first_name.ilike(search_query),
+                User.last_name.ilike(search_query)
+            )
+        )
+
+        # Paginate results
+        pagination = users_query.paginate(page=page, per_page=per_page)
+
+        results = []
+        for user in pagination.items:
+            # Skip private users that aren't followed by current user
+            if user.is_private and current_user_id and current_user_id != user.id:
+                current_user = User.query.get(current_user_id)
+                if not current_user or not current_user.is_following(user):
+                    continue
+            elif user.is_private and not current_user_id:
+                continue
+
+            # Check relationship with current user
+            is_following = False
+            is_followed_by = False
+
+            if current_user_id:
+                current_user = User.query.get(current_user_id)
+                if current_user:
+                    is_following = current_user.is_following(user)
+                    is_followed_by = user.is_following(current_user)
+
+            results.append({
+                'id': user.id,
+                'username': user.username,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'profile_picture': user.profile_picture,
+                'is_private': user.is_private,
+                'is_following': is_following,
+                'is_followed_by': is_followed_by
+            })
+
+        return {
+            'users': results,
+            'total': pagination.total,
+            'page': pagination.page,
+            'pages': pagination.pages,
+            'per_page': pagination.per_page
+        }
+
+
+@users_ns.route('/profile-picture')
+class ProfilePicture(Resource):
+    @jwt_required()
+    def post(self):
+        """Upload profile picture"""
+        current_user_id = get_jwt_identity()
+        user = User.query.get_or_404(current_user_id)
+
+        # Check if file is present
+        if 'file' not in request.files:
+            return {'message': 'No file provided'}, 400
+
+        file = request.files['file']
+
+        # Check if file is valid
+        if file.filename == '':
+            return {'message': 'No file selected'}, 400
+
+        if not allowed_file(file.filename):
+            return {'message': 'File type not allowed. Please upload an image (png, jpg, jpeg, gif)'}, 400
+
+        # Generate unique filename to prevent collisions
+        filename = secure_filename(file.filename)
+        unique_filename = f"{uuid.uuid4().hex}_{filename}"
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
+
+        try:
+            # Save the file
+            file.save(file_path)
+
+            # Update user's profile picture
+            user.profile_picture = f"/media/profile/{unique_filename}"
+            db.session.commit()
+
+            return {'message': 'Profile picture updated successfully', 'url': user.profile_picture}, 200
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+@media_ns.route('/profile/<path:filename>')
+class GetProfilePicture(Resource):
+    def get(self, filename):
+        """Get profile picture"""
+        return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
