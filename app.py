@@ -19,6 +19,7 @@ import re
 import secrets
 from flask_mail import Mail, Message
 from threading import Thread
+from sqlalchemy import func
 
 
 
@@ -1207,3 +1208,1223 @@ class GetProfilePicture(Resource):
     def get(self, filename):
         """Get profile picture"""
         return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+# Post creation model
+post_create_model = posts_ns.model('PostCreate', {
+    'content': fields.String(required=True, description='Post content/caption'),
+    'visibility': fields.String(required=False, default='public', enum=['public', 'followers', 'private'], description='Post visibility'),
+    'media_id': fields.Integer(required=False, description='ID of previously uploaded media')
+})
+
+# Post update model
+post_update_model = posts_ns.model('PostUpdate', {
+    'content': fields.String(required=False, description='Updated post content/caption'),
+    'visibility': fields.String(required=False, enum=['public', 'followers', 'private'], description='Updated post visibility')
+})
+
+# Post response model
+post_model = posts_ns.model('Post', {
+    'id': fields.Integer(description='Post ID'),
+    'content': fields.String(description='Post content/caption'),
+    'created_at': fields.DateTime(description='Post creation time'),
+    'updated_at': fields.DateTime(description='Post last update time'),
+    'visibility': fields.String(description='Post visibility'),
+    'likes_count': fields.Integer(description='Number of likes on the post'),
+    'comments_count': fields.Integer(description='Number of comments on the post'),
+    'media_url': fields.String(description='URL to media, if any'),
+    'media_type': fields.String(description='Type of media'),
+    'author': fields.Nested(users_ns.models['UserInfo'], description='Post author information'),
+    'current_user_liked': fields.Boolean(description='Whether current user liked this post')
+})
+
+
+# Posts list model
+posts_list_model = posts_ns.model('PostsList', {
+    'posts': fields.List(fields.Nested(post_model)),
+    'total': fields.Integer(description='Total number of results'),
+    'page': fields.Integer(description='Current page number'),
+    'pages': fields.Integer(description='Total number of pages'),
+    'per_page': fields.Integer(description='Results per page')
+})
+
+# Media upload response model
+media_upload_model = media_ns.model('MediaUpload', {
+    'id': fields.Integer(description='Media ID'),
+    'media_url': fields.String(description='URL to the uploaded media'),
+    'media_type': fields.String(description='Type of media'),
+    'size': fields.Integer(description='Size of media in bytes'),
+    'upload_time': fields.DateTime(description='Upload timestamp')
+})
+
+# Hashtag model
+hashtag_model = posts_ns.model('Hashtag', {
+    'id': fields.Integer(description='Hashtag ID'),
+    'name': fields.String(description='Hashtag name'),
+    'posts_count': fields.Integer(description='Number of posts with this hashtag')
+})
+
+# Hashtags list model
+hashtags_list_model = posts_ns.model('HashtagsList', {
+    'hashtags': fields.List(fields.Nested(hashtag_model)),
+    'total': fields.Integer(description='Total number of results'),
+    'page': fields.Integer(description='Current page number'),
+    'pages': fields.Integer(description='Total number of pages'),
+    'per_page': fields.Integer(description='Results per page')
+})
+
+
+# Now let's implement the Hashtags model
+class Hashtag(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    def __repr__(self):
+        return f"<Hashtag id={self.id} name={self.name}>"
+
+
+# Post-Hashtag association table
+post_hashtags = db.Table('post_hashtags',
+                         db.Column('post_id', db.Integer, db.ForeignKey('post.id'), primary_key=True),
+                         db.Column('hashtag_id', db.Integer, db.ForeignKey('hashtag.id'), primary_key=True),
+                         db.Column('created_at', db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+                         )
+
+Post.hashtags = db.relationship('Hashtag', secondary=post_hashtags, backref=db.backref('posts', lazy='dynamic'))
+
+# Helper function to extract hashtags from post content
+def extract_hashtags(content):
+    """Extract hashtags from post content and return a list of hashtag names"""
+    hashtag_pattern = re.compile(r'#(\w+)')
+    return hashtag_pattern.findall(content)
+
+# Function to create or get existing hashtags
+def get_or_create_hashtags(hashtag_names):
+    """Get existing hashtags or create new ones for the given names"""
+    hashtags = []
+    for name in hashtag_names:
+        hashtag = Hashtag.query.filter_by(name=name.lower()).first()
+        if not hashtag:
+            hashtag = Hashtag(name=name.lower())
+            db.session.add(hashtag)
+        hashtags.append(hashtag)
+    return hashtags
+
+# api endpoints
+@media_ns.route('/upload')
+class MediaUpload(Resource):
+    @jwt_required()
+    @media_ns.doc(params={'file': 'Media file to upload'})
+    @media_ns.marshal_with(media_upload_model)
+    def post(self):
+        """Upload media (image or video)"""
+        current_user_id = get_jwt_identity()
+
+        # Check if file is present
+        if 'file' not in request.files:
+            return {'message': 'No file provided'}, 400
+
+        file = request.files['file']
+
+        # Check if file is valid
+        if file.filename == '':
+            return {'message': 'No file selected'}, 400
+
+        if not allowed_file(file.filename):
+            return {'message': 'File type not allowed. Please upload an image (png, jpg, jpeg, gif)'}, 400
+
+        # Generate unique filename to prevent collisions
+        filename = secure_filename(file.filename)
+        unique_filename = f"{uuid.uuid4().hex}_{filename}"
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
+
+        try:
+            # Save the file
+            file.save(file_path)
+
+            # Determine media type
+            media_type = filename.rsplit('.', 1)[1].lower()
+
+            # Create media record
+            media = MediaFile(
+                user_id=current_user_id,
+                filename=unique_filename,
+                media_type=media_type,
+                size=os.path.getsize(file_path)
+            )
+
+            db.session.add(media)
+            db.session.commit()
+
+            return {
+                'id': media.id,
+                'media_url': f"/media/content/{unique_filename}",
+                'media_type': media.media_type,
+                'size': media.size,
+                'upload_time': media.upload_time
+            }, 201
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+@media_ns.route('/content/<path:filename>')
+class GetMedia(Resource):
+    def get(self, filename):
+        """Get uploaded media"""
+        return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+
+@posts_ns.route('/')
+class PostsResource(Resource):
+    @jwt_required()
+    @posts_ns.expect(post_create_model)
+    @posts_ns.marshal_with(post_model)
+    def post(self):
+        """Create a new post"""
+        current_user_id = get_jwt_identity()
+        user = User.query.get_or_404(current_user_id)
+        data = request.json
+
+        content = data.get('content', '').strip()
+        visibility = data.get('visibility', 'public')
+        media_id = data.get('media_id')
+
+        if not content and not media_id:
+            return {'message': 'Post must contain either text content or media'}, 400
+
+        # Create post
+        new_post = Post(
+            content=content,
+            user_id=current_user_id,
+            visibility=visibility
+        )
+
+        # Associate media if provided
+        if media_id:
+            media = MediaFile.query.filter_by(id=media_id, user_id=current_user_id).first()
+            if not media:
+                return {'message': 'Media not found or does not belong to you'}, 404
+
+            new_post.media_url = f"/media/content/{media.filename}"
+            new_post.media_type = media.media_type
+            media.post_id = new_post.id
+
+        try:
+            db.session.add(new_post)
+            db.session.flush()  # To get the post ID before commit
+
+            # Process hashtags if present
+            if content:
+                hashtag_names = extract_hashtags(content)
+                if hashtag_names:
+                    hashtags = get_or_create_hashtags(hashtag_names)
+                    new_post.hashtags = hashtags
+
+            db.session.commit()
+
+            # Format response
+            return {
+                'id': new_post.id,
+                'content': new_post.content,
+                'created_at': new_post.created_at,
+                'updated_at': new_post.updated_at,
+                'visibility': new_post.visibility,
+                'likes_count': 0,
+                'comments_count': 0,
+                'media_url': new_post.media_url,
+                'media_type': new_post.media_type,
+                'author': {
+                    'id': user.id,
+                    'username': user.username,
+                    'first_name': user.first_name,
+                    'last_name': user.last_name,
+                    'profile_picture': user.profile_picture,
+                    'is_private': user.is_private,
+                    'is_following': False,
+                    'is_followed_by': False
+                },
+                'current_user_liked': False
+            }, 201
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+    @jwt_required(optional=True)
+    @posts_ns.doc(params={'page': 'Page number', 'per_page': 'Results per page'})
+    @posts_ns.marshal_with(posts_list_model)
+    def get(self):
+        """Get posts feed (personalized if authenticated)"""
+        current_user_id = get_jwt_identity()
+
+        # Get query parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+
+        # Base query for public posts
+        base_query = Post.query.filter_by(visibility='public')
+
+        # If user is authenticated, enhance the feed
+        if current_user_id:
+            current_user = User.query.get(current_user_id)
+
+            if current_user:
+                # Include posts from followed users (regardless of visibility)
+                followed_users_ids = [user.id for user in current_user.following]
+
+                if followed_users_ids:
+                    # Show public posts + posts from followed users (with appropriate visibility)
+                    base_query = Post.query.filter(
+                        db.or_(
+                            Post.visibility == 'public',
+                            db.and_(
+                                Post.user_id.in_(followed_users_ids),
+                                db.or_(
+                                    Post.visibility == 'public',
+                                    Post.visibility == 'followers'
+                                )
+                            ),
+                            # Include user's own posts
+                            Post.user_id == current_user_id
+                        )
+                    )
+
+        # Order by creation date (newest first)
+        posts_query = base_query.order_by(Post.created_at.desc())
+
+        # Paginate results
+        pagination = posts_query.paginate(page=page, per_page=per_page)
+
+        results = []
+        for post in pagination.items:
+            # Get author info
+            author = User.query.get(post.user_id)
+
+            # Check if current user liked the post
+            current_user_liked = False
+            if current_user_id:
+                like = Like.query.filter_by(user_id=current_user_id, post_id=post.id).first()
+                current_user_liked = like is not None
+
+            # Check following status if authenticated
+            is_following = False
+            is_followed_by = False
+            if current_user_id and author.id != current_user_id:
+                current_user = User.query.get(current_user_id)
+                if current_user:
+                    is_following = current_user.is_following(author)
+                    is_followed_by = author.is_following(current_user)
+
+            results.append({
+                'id': post.id,
+                'content': post.content,
+                'created_at': post.created_at,
+                'updated_at': post.updated_at,
+                'visibility': post.visibility,
+                'likes_count': post.likes.count(),
+                'comments_count': post.comments.count(),
+                'media_url': post.media_url,
+                'media_type': post.media_type,
+                'author': {
+                    'id': author.id,
+                    'username': author.username,
+                    'first_name': author.first_name,
+                    'last_name': author.last_name,
+                    'profile_picture': author.profile_picture,
+                    'is_private': author.is_private,
+                    'is_following': is_following,
+                    'is_followed_by': is_followed_by
+                },
+                'current_user_liked': current_user_liked
+            })
+
+        return {
+            'posts': results,
+            'total': pagination.total,
+            'page': pagination.page,
+            'pages': pagination.pages,
+            'per_page': pagination.per_page
+        }
+
+
+@posts_ns.route('/<int:post_id>')
+class PostResource(Resource):
+    @jwt_required(optional=True)
+    @posts_ns.marshal_with(post_model)
+    def get(self, post_id):
+        """Get a specific post"""
+        current_user_id = get_jwt_identity()
+        post = Post.query.get_or_404(post_id)
+        author = User.query.get(post.user_id)
+
+        # Check visibility permissions
+        if post.visibility == 'private' and (not current_user_id or current_user_id != author.id):
+            return {'message': 'This post is private'}, 403
+
+        elif post.visibility == 'followers' and current_user_id != author.id:
+            if not current_user_id:
+                return {'message': 'This post is only visible to followers'}, 403
+
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post is only visible to followers'}, 403
+
+        # Check if author profile is private
+        if author.is_private and current_user_id != author.id:
+            if not current_user_id:
+                return {'message': 'This post belongs to a private account'}, 403
+
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post belongs to a private account'}, 403
+
+        # Check if current user liked the post
+        current_user_liked = False
+        if current_user_id:
+            like = Like.query.filter_by(user_id=current_user_id, post_id=post.id).first()
+            current_user_liked = like is not None
+
+        # Check following status if authenticated
+        is_following = False
+        is_followed_by = False
+        if current_user_id and author.id != current_user_id:
+            current_user = User.query.get(current_user_id)
+            if current_user:
+                is_following = current_user.is_following(author)
+                is_followed_by = author.is_following(current_user)
+
+        return {
+            'id': post.id,
+            'content': post.content,
+            'created_at': post.created_at,
+            'updated_at': post.updated_at,
+            'visibility': post.visibility,
+            'likes_count': post.likes.count(),
+            'comments_count': post.comments.count(),
+            'media_url': post.media_url,
+            'media_type': post.media_type,
+            'author': {
+                'id': author.id,
+                'username': author.username,
+                'first_name': author.first_name,
+                'last_name': author.last_name,
+                'profile_picture': author.profile_picture,
+                'is_private': author.is_private,
+                'is_following': is_following,
+                'is_followed_by': is_followed_by
+            },
+            'current_user_liked': current_user_liked
+        }
+
+    @jwt_required()
+    @posts_ns.expect(post_update_model)
+    @posts_ns.marshal_with(post_model)
+    def put(self, post_id):
+        """Update a post"""
+        current_user_id = get_jwt_identity()
+        post = Post.query.get_or_404(post_id)
+
+        # Check if user is the author
+        if post.user_id != current_user_id:
+            return {'message': 'You can only edit your own posts'}, 403
+
+        data = request.json
+
+        # Update fields if provided
+        if 'content' in data:
+            post.content = data['content'].strip()
+
+            # Re-process hashtags if content changed
+            if post.hashtags:
+                # Remove old hashtag associations
+                post.hashtags = []
+
+            hashtag_names = extract_hashtags(post.content)
+            if hashtag_names:
+                hashtags = get_or_create_hashtags(hashtag_names)
+                post.hashtags = hashtags
+
+        if 'visibility' in data:
+            post.visibility = data['visibility']
+
+        try:
+            # Update timestamp
+            post.updated_at = datetime.now(timezone.utc)
+            db.session.commit()
+
+            # Get author info
+            author = User.query.get(post.user_id)
+
+            return {
+                'id': post.id,
+                'content': post.content,
+                'created_at': post.created_at,
+                'updated_at': post.updated_at,
+                'visibility': post.visibility,
+                'likes_count': post.likes.count(),
+                'comments_count': post.comments.count(),
+                'media_url': post.media_url,
+                'media_type': post.media_type,
+                'author': {
+                    'id': author.id,
+                    'username': author.username,
+                    'first_name': author.first_name,
+                    'last_name': author.last_name,
+                    'profile_picture': author.profile_picture,
+                    'is_private': author.is_private,
+                    'is_following': False,
+                    'is_followed_by': False
+                },
+                'current_user_liked': False  # The user is the author, so they can't like their own post
+            }
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+    @jwt_required()
+    def delete(self, post_id):
+        """Delete a post"""
+        current_user_id = get_jwt_identity()
+        post = Post.query.get_or_404(post_id)
+
+        # Check if user is the author or an admin
+        user = User.query.get(current_user_id)
+        if post.user_id != current_user_id and not user.is_admin:
+            return {'message': 'You can only delete your own posts'}, 403
+
+        try:
+            # Remove hashtag associations
+            if post.hashtags:
+                post.hashtags = []
+
+            # Delete the post
+            db.session.delete(post)
+            db.session.commit()
+
+            return {'message': 'Post deleted successfully'}, 200
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+
+@posts_ns.route('/user/<int:user_id>')
+class UserPosts(Resource):
+    @jwt_required(optional=True)
+    @posts_ns.doc(params={'page': 'Page number', 'per_page': 'Results per page'})
+    @posts_ns.marshal_with(posts_list_model)
+    def get(self, user_id):
+        """Get posts by a specific user"""
+        current_user_id = get_jwt_identity()
+
+        # Get query parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+
+        user = User.query.get_or_404(user_id)
+
+        # Check if profile is private
+        if user.is_private and current_user_id != user_id:
+            if not current_user_id:
+                return {'message': 'This profile is private'}, 403
+
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(user):
+                return {'message': 'This profile is private'}, 403
+
+        # Build post query based on visibility permissions
+        if current_user_id == user_id:
+            # User can see all their own posts
+            posts_query = Post.query.filter_by(user_id=user_id)
+        else:
+            # Others can see public posts plus followers-only if they're following
+            visibility_filters = ['public']
+            if current_user_id:
+                current_user = User.query.get(current_user_id)
+                if current_user and current_user.is_following(user):
+                    visibility_filters.append('followers')
+
+            posts_query = Post.query.filter(
+                Post.user_id == user_id,
+                Post.visibility.in_(visibility_filters)
+            )
+
+        # Order by creation date (newest first)
+        posts_query = posts_query.order_by(Post.created_at.desc())
+
+        # Paginate results
+        pagination = posts_query.paginate(page=page, per_page=per_page)
+
+        results = []
+        for post in pagination.items:
+            # Check if current user liked the post
+            current_user_liked = False
+            if current_user_id:
+                like = Like.query.filter_by(user_id=current_user_id, post_id=post.id).first()
+                current_user_liked = like is not None
+
+            # Check following status if authenticated
+            is_following = False
+            is_followed_by = False
+            if current_user_id and user.id != current_user_id:
+                current_user = User.query.get(current_user_id)
+                if current_user:
+                    is_following = current_user.is_following(user)
+                    is_followed_by = user.is_following(current_user)
+
+            results.append({
+                'id': post.id,
+                'content': post.content,
+                'created_at': post.created_at,
+                'updated_at': post.updated_at,
+                'visibility': post.visibility,
+                'likes_count': post.likes.count(),
+                'comments_count': post.comments.count(),
+                'media_url': post.media_url,
+                'media_type': post.media_type,
+                'author': {
+                    'id': user.id,
+                    'username': user.username,
+                    'first_name': user.first_name,
+                    'last_name': user.last_name,
+                    'profile_picture': user.profile_picture,
+                    'is_private': user.is_private,
+                    'is_following': is_following,
+                    'is_followed_by': is_followed_by
+                },
+                'current_user_liked': current_user_liked
+            })
+
+        return {
+            'posts': results,
+            'total': pagination.total,
+            'page': pagination.page,
+            'pages': pagination.pages,
+            'per_page': pagination.per_page
+        }
+
+
+@posts_ns.route('/like/<int:post_id>')
+class LikePost(Resource):
+    @jwt_required()
+    def post(self, post_id):
+        """Like a post"""
+        current_user_id = get_jwt_identity()
+        post = Post.query.get_or_404(post_id)
+        author = User.query.get(post.user_id)
+
+        # Check visibility permissions
+        if post.visibility == 'private' and current_user_id != author.id:
+            return {'message': 'This post is private'}, 403
+
+        elif post.visibility == 'followers' and current_user_id != author.id:
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post is only visible to followers'}, 403
+
+        # Check if author profile is private
+        if author.is_private and current_user_id != author.id:
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post belongs to a private account'}, 403
+
+        # Check if already liked
+        existing_like = Like.query.filter_by(user_id=current_user_id, post_id=post_id).first()
+        if existing_like:
+            return {'message': 'Post already liked'}, 409
+
+        try:
+            # Create like
+            new_like = Like(user_id=current_user_id, post_id=post_id)
+            db.session.add(new_like)
+
+            # Create notification for post author if not self
+            if current_user_id != author.id:
+                current_user = User.query.get(current_user_id)
+                notification = Notification(
+                    user_id=author.id,
+                    actor_id=current_user_id,
+                    notification_type='like',
+                    target_id=post_id,
+                    target_type='post',
+                    message=f"{current_user.username} liked your post"
+                )
+                db.session.add(notification)
+
+            db.session.commit()
+
+            return {'message': 'Post liked successfully', 'likes_count': post.likes.count()}, 200
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+
+@posts_ns.route('/unlike/<int:post_id>')
+class UnlikePost(Resource):
+    @jwt_required()
+    def post(self, post_id):
+        """Unlike a post"""
+        current_user_id = get_jwt_identity()
+        post = Post.query.get_or_404(post_id)
+
+        # Check if liked
+        existing_like = Like.query.filter_by(user_id=current_user_id, post_id=post_id).first()
+        if not existing_like:
+            return {'message': 'Post not liked'}, 400
+
+        try:
+            # Remove like
+            db.session.delete(existing_like)
+            db.session.commit()
+
+            return {'message': 'Post unliked successfully', 'likes_count': post.likes.count()}, 200
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+
+@posts_ns.route('/discover')
+class DiscoverPosts(Resource):
+    @jwt_required(optional=True)
+    @posts_ns.doc(params={'page': 'Page number', 'per_page': 'Results per page'})
+    @posts_ns.marshal_with(posts_list_model)
+    def get(self):
+        """Discover posts (trending or recommended)"""
+        current_user_id = get_jwt_identity()
+
+        # Get query parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+
+        # Start with public posts only
+        base_query = Post.query.filter_by(visibility='public')
+
+        if current_user_id:
+            # For logged-in users, exclude posts from blocked users
+            # (This would require implementing a blocked users system)
+            pass
+
+        # For a simple discover feed, get posts with most interactions recently
+        # More sophisticated recommendation systems would need separate services
+        one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        popular_posts = base_query.filter(Post.created_at >= one_week_ago).join(Like).group_by(Post.id).order_by(
+            db.func.count(Like.id).desc(),
+            db.func.count(Comment.id).desc(),
+            Post.created_at.desc()
+        )
+
+        # Paginate results
+        pagination = popular_posts.paginate(page=page, per_page=per_page)
+
+        results = []
+        for post in pagination.items:
+            # Get author info
+            author = User.query.get(post.user_id)
+
+            # Check if current user liked the post
+            current_user_liked = False
+            if current_user_id:
+                like = Like.query.filter_by(user_id=current_user_id, post_id=post.id).first()
+                current_user_liked = like is not None
+
+            # Check following status if authenticated
+            is_following = False
+            is_followed_by = False
+            if current_user_id and author.id != current_user_id:
+                current_user = User.query.get(current_user_id)
+                if current_user:
+                    is_following = current_user.is_following(author)
+                    is_followed_by = author.is_following(current_user)
+
+            results.append({
+                'id': post.id,
+                'content': post.content,
+                'created_at': post.created_at,
+                'updated_at': post.updated_at,
+                'visibility': post.visibility,
+                'likes_count': post.likes.count(),
+                'comments_count': post.comments.count(),
+                'media_url': post.media_url,
+                'author':{
+                    'id': author.id,
+                    'username': author.username,
+                    'first_name': author.first_name,
+                    'last_name': author.last_name,
+                    'profile_picture': author.profile_picture,
+                    'is_private': author.is_private,
+                    'is_following': is_following,
+                    'is_followed_by': is_followed_by
+                },
+                'current_user_liked': current_user_liked
+
+            })
+        return {
+            'posts': results,
+            'total': pagination.total,
+            'page': pagination.page,
+            'pages': pagination.pages,
+            'per_page': pagination.per_page
+        }
+
+@posts_ns.route('/hashtag/<string:hashtag_name>')
+class HashtagPosts(Resource):
+    @jwt_required(optional=True)
+    @posts_ns.doc(params={'page': 'Page number', 'per_page': 'Results per page'})
+    @posts_ns.marshal_with(posts_list_model)
+    def get(self, hashtag_name):
+        """Get posts with a specific hashtag"""
+        current_user_id = get_jwt_identity()
+
+        # Get query parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+
+        # Find hashtag (case insensitive)
+        hashtag = Hashtag.query.filter(func.lower(Hashtag.name) == func.lower(hashtag_name)).first()
+        if not hashtag:
+            return {'message': 'Hashtag not found'}, 404
+
+        # Get posts with this hashtag that the user has permission to view
+        base_query = Post.query.join(post_hashtags).join(Hashtag).filter(
+            Hashtag.id == hashtag.id
+        )
+
+        # Filter based on visibility and user authentication
+        if current_user_id:
+            current_user = User.query.get(current_user_id)
+            if current_user:
+                # Get IDs of users the current user follows
+                followed_users_ids = [user.id for user in current_user.following]
+
+                base_query = base_query.filter(
+                    db.or_(
+                        # Public posts
+                        Post.visibility == 'public',
+
+                        # Followers-only posts from followed users
+                        db.and_(
+                            Post.user_id.in_(followed_users_ids),
+                            Post.visibility == 'followers'
+                        ),
+
+                        # User's own posts
+                        Post.user_id == current_user_id
+                    )
+                )
+        else:
+            # Only public posts for unauthenticated users
+            base_query = base_query.filter(Post.visibility == 'public')
+
+        # Additionally filter out posts from private accounts unless following
+        if current_user_id:
+            # No filter needed for user's own posts
+            private_users_query = User.query.filter(
+                User.is_private == True,
+                User.id != current_user_id
+            )
+
+            # Exclude posts from private users that the current user doesn't follow
+            private_users_not_followed = [
+                u.id for u in private_users_query.all()
+                if u.id not in [user.id for user in current_user.following]
+            ]
+
+            if private_users_not_followed:
+                base_query = base_query.filter(~Post.user_id.in_(private_users_not_followed))
+        else:
+            # For anonymous users, exclude all posts from private accounts
+            private_users = [u.id for u in User.query.filter_by(is_private=True).all()]
+            if private_users:
+                base_query = base_query.filter(~Post.user_id.in_(private_users))
+
+        # Order by creation date (newest first)
+        posts_query = base_query.order_by(Post.created_at.desc())
+
+        # Paginate results
+        pagination = posts_query.paginate(page=page, per_page=per_page)
+
+        results = []
+        for post in pagination.items:
+            # Get author info
+            author = User.query.get(post.user_id)
+
+            # Check if current user liked the post
+            current_user_liked = False
+            if current_user_id:
+                like = Like.query.filter_by(user_id=current_user_id, post_id=post.id).first()
+                current_user_liked = like is not None
+
+            # Check following status if authenticated
+            is_following = False
+            is_followed_by = False
+            if current_user_id and author.id != current_user_id:
+                current_user = User.query.get(current_user_id)
+                if current_user:
+                    is_following = current_user.is_following(author)
+                    is_followed_by = author.is_following(current_user)
+
+            results.append({
+                'id': post.id,
+                'content': post.content,
+                'created_at': post.created_at,
+                'updated_at': post.updated_at,
+                'visibility': post.visibility,
+                'likes_count': post.likes.count(),
+                'comments_count': post.comments.count(),
+                'media_url': post.media_url,
+                'media_type': post.media_type,
+                'author': {
+                    'id': author.id,
+                    'username': author.username,
+                    'first_name': author.first_name,
+                    'last_name': author.last_name,
+                    'profile_picture': author.profile_picture,
+                    'is_private': author.is_private,
+                    'is_following': is_following,
+                    'is_followed_by': is_followed_by
+                },
+                'current_user_liked': current_user_liked
+            })
+
+        return {
+            'posts': results,
+            'total': pagination.total,
+            'page': pagination.page,
+            'pages': pagination.pages,
+            'per_page': pagination.per_page
+        }
+
+
+@posts_ns.route('/trending-hashtags')
+class TrendingHashtags(Resource):
+    @jwt_required(optional=True)
+    @posts_ns.doc(params={'limit': 'Maximum number of hashtags to return'})
+    @posts_ns.marshal_with(hashtags_list_model)
+    def get(self):
+        """Get trending hashtags based on recent activity"""
+        # Get query parameters
+        limit = request.args.get('limit', 10, type=int)
+
+        # Calculate trending over the past week
+        one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+
+        # Get hashtags with most posts in the past week
+        trending_hashtags = db.session.query(
+            Hashtag,
+            db.func.count(post_hashtags.c.post_id).label('post_count')
+        ).join(
+            post_hashtags
+        ).join(
+            Post
+        ).filter(
+            post_hashtags.c.created_at >= one_week_ago,
+            # Only count public posts
+            Post.visibility == 'public'
+        ).group_by(
+            Hashtag.id
+        ).order_by(
+            db.desc('post_count'),
+            Hashtag.name
+        ).limit(limit).all()
+
+        results = []
+        for hashtag, post_count in trending_hashtags:
+            results.append({
+                'id': hashtag.id,
+                'name': hashtag.name,
+                'posts_count': post_count
+            })
+
+        return {
+            'hashtags': results,
+            'total': len(results),
+            'page': 1,
+            'pages': 1,
+            'per_page': limit
+        }
+
+
+@posts_ns.route('/search')
+class PostSearch(Resource):
+    @jwt_required(optional=True)
+    @posts_ns.doc(params={
+        'q': 'Search query',
+        'page': 'Page number',
+        'per_page': 'Results per page'
+    })
+    @posts_ns.marshal_with(posts_list_model)
+    def get(self):
+        """Search for posts by content"""
+        current_user_id = get_jwt_identity()
+
+        # Get query parameters
+        query = request.args.get('q', '').strip()
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+
+        if not query:
+            return {'message': 'Search query is required'}, 400
+
+        # Search posts by content
+        # Using ILIKE for case-insensitive search
+        base_query = Post.query.filter(Post.content.ilike(f'%{query}%'))
+
+        # Filter based on visibility and user authentication
+        if current_user_id:
+            current_user = User.query.get(current_user_id)
+            if current_user:
+                # Get IDs of users the current user follows
+                followed_users_ids = [user.id for user in current_user.following]
+
+                base_query = base_query.filter(
+                    db.or_(
+                        # Public posts
+                        Post.visibility == 'public',
+
+                        # Followers-only posts from followed users
+                        db.and_(
+                            Post.user_id.in_(followed_users_ids),
+                            Post.visibility == 'followers'
+                        ),
+
+                        # User's own posts
+                        Post.user_id == current_user_id
+                    )
+                )
+        else:
+            # Only public posts for unauthenticated users
+            base_query = base_query.filter(Post.visibility == 'public')
+
+        # Additionally filter out posts from private accounts unless following
+        if current_user_id:
+            # No filter needed for user's own posts
+            private_users_query = User.query.filter(
+                User.is_private == True,
+                User.id != current_user_id
+            )
+
+            # Exclude posts from private users that the current user doesn't follow
+            private_users_not_followed = [
+                u.id for u in private_users_query.all()
+                if u.id not in [user.id for user in current_user.following]
+            ]
+
+            if private_users_not_followed:
+                base_query = base_query.filter(~Post.user_id.in_(private_users_not_followed))
+        else:
+            # For anonymous users, exclude all posts from private accounts
+            private_users = [u.id for u in User.query.filter_by(is_private=True).all()]
+            if private_users:
+                base_query = base_query.filter(~Post.user_id.in_(private_users))
+
+        # Order by relevance and then by date
+        # For more sophisticated relevance ranking, consider using a search engine like Elasticsearch
+        posts_query = base_query.order_by(
+            # Exact matches first
+            db.case([(Post.content.ilike(f'{query}'), 0)], else_=1),
+            # Posts with query in the beginning next
+            db.case([(Post.content.ilike(f'{query}%'), 0)], else_=1),
+            # Then by creation date
+            Post.created_at.desc()
+        )
+
+        # Paginate results
+        pagination = posts_query.paginate(page=page, per_page=per_page)
+
+        results = []
+        for post in pagination.items:
+            # Get author info
+            author = User.query.get(post.user_id)
+
+            # Check if current user liked the post
+            current_user_liked = False
+            if current_user_id:
+                like = Like.query.filter_by(user_id=current_user_id, post_id=post.id).first()
+                current_user_liked = like is not None
+
+            # Check following status if authenticated
+            is_following = False
+            is_followed_by = False
+            if current_user_id and author.id != current_user_id:
+                current_user = User.query.get(current_user_id)
+                if current_user:
+                    is_following = current_user.is_following(author)
+                    is_followed_by = author.is_following(current_user)
+
+            results.append({
+                'id': post.id,
+                'content': post.content,
+                'created_at': post.created_at,
+                'updated_at': post.updated_at,
+                'visibility': post.visibility,
+                'likes_count': post.likes.count(),
+                'comments_count': post.comments.count(),
+                'media_url': post.media_url,
+                'media_type': post.media_type,
+                'author': {
+                    'id': author.id,
+                    'username': author.username,
+                    'first_name': author.first_name,
+                    'last_name': author.last_name,
+                    'profile_picture': author.profile_picture,
+                    'is_private': author.is_private,
+                    'is_following': is_following,
+                    'is_followed_by': is_followed_by
+                },
+                'current_user_liked': current_user_liked
+            })
+
+        return {
+            'posts': results,
+            'total': pagination.total,
+            'page': pagination.page,
+            'pages': pagination.pages,
+            'per_page': pagination.per_page
+        }
+
+
+@posts_ns.route('/saved')
+class SavedPosts(Resource):
+    @jwt_required()
+    @posts_ns.doc(params={'page': 'Page number', 'per_page': 'Results per page'})
+    @posts_ns.marshal_with(posts_list_model)
+    def get(self):
+        """Get current user's saved posts"""
+        current_user_id = get_jwt_identity()
+
+        # Get query parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+
+        # Get saved posts for the current user
+        saved_posts_query = Post.query.join(SavedPost).filter(
+            SavedPost.user_id == current_user_id
+        ).order_by(SavedPost.saved_at.desc())
+
+        # Paginate results
+        pagination = saved_posts_query.paginate(page=page, per_page=per_page)
+
+        results = []
+        for post in pagination.items:
+            # Get author info
+            author = User.query.get(post.user_id)
+
+            # Check if current user liked the post
+            like = Like.query.filter_by(user_id=current_user_id, post_id=post.id).first()
+            current_user_liked = like is not None
+
+            # Check following status
+            is_following = False
+            is_followed_by = False
+            if author.id != current_user_id:
+                current_user = User.query.get(current_user_id)
+                is_following = current_user.is_following(author)
+                is_followed_by = author.is_following(current_user)
+
+            results.append({
+                'id': post.id,
+                'content': post.content,
+                'created_at': post.created_at,
+                'updated_at': post.updated_at,
+                'visibility': post.visibility,
+                'likes_count': post.likes.count(),
+                'comments_count': post.comments.count(),
+                'media_url': post.media_url,
+                'media_type': post.media_type,
+                'author': {
+                    'id': author.id,
+                    'username': author.username,
+                    'first_name': author.first_name,
+                    'last_name': author.last_name,
+                    'profile_picture': author.profile_picture,
+                    'is_private': author.is_private,
+                    'is_following': is_following,
+                    'is_followed_by': is_followed_by
+                },
+                'current_user_liked': current_user_liked
+            })
+
+        return {
+            'posts': results,
+            'total': pagination.total,
+            'page': pagination.page,
+            'pages': pagination.pages,
+            'per_page': pagination.per_page
+        }
+
+
+@posts_ns.route('/save/<int:post_id>')
+class SavePost(Resource):
+    @jwt_required()
+    def post(self, post_id):
+        """Save a post"""
+        current_user_id = get_jwt_identity()
+        post = Post.query.get_or_404(post_id)
+
+        # Check visibility permissions first
+        author = User.query.get(post.user_id)
+
+        # Check visibility permissions
+        if post.visibility == 'private' and current_user_id != author.id:
+            return {'message': 'This post is private'}, 403
+
+        elif post.visibility == 'followers' and current_user_id != author.id:
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post is only visible to followers'}, 403
+
+        # Check if author profile is private
+        if author.is_private and current_user_id != author.id:
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post belongs to a private account'}, 403
+
+        # Check if already saved
+        existing_save = SavedPost.query.filter_by(user_id=current_user_id, post_id=post_id).first()
+        if existing_save:
+            return {'message': 'Post already saved'}, 409
+
+        try:
+            # Create saved post record
+            saved_post = SavedPost(user_id=current_user_id, post_id=post_id)
+            db.session.add(saved_post)
+            db.session.commit()
+
+            return {'message': 'Post saved successfully'}, 200
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+
+@posts_ns.route('/unsave/<int:post_id>')
+class UnsavePost(Resource):
+    @jwt_required()
+    def post(self, post_id):
+        """Unsave a post"""
+        current_user_id = get_jwt_identity()
+
+        # Check if saved
+        saved_post = SavedPost.query.filter_by(user_id=current_user_id, post_id=post_id).first()
+        if not saved_post:
+            return {'message': 'Post not saved'}, 400
+
+        try:
+            # Remove saved post record
+            db.session.delete(saved_post)
+            db.session.commit()
+
+            return {'message': 'Post unsaved successfully'}, 200
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+
+# Add SavedPost model if it doesn't already exist
+class SavedPost(db.Model):
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), primary_key=True)
+    post_id = db.Column(db.Integer, db.ForeignKey('post.id'), primary_key=True)
+    saved_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    user = db.relationship('User', backref=db.backref('saved_posts', lazy='dynamic'))
+    post = db.relationship('Post', backref=db.backref('saved_by', lazy='dynamic'))
+
+    def __repr__(self):
+        return f"<SavedPost user_id={self.user_id} post_id={self.post_id}>"
