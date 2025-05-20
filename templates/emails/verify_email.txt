@@ -1,0 +1,8 @@
+Hello {{ user.first_name }},
+
+Thank you for registering. Please verify your email by visiting this link:
+
+{{ verification_url }}
+
+Best regards,
+The Team

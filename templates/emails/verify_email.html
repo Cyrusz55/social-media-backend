@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: Arial, sans-serif; }
+        .button {
+            display: inline-block;
+            background-color: #4a86e8;
+            color: white;
+            padding: 10px 20px;
+            text-decoration: none;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Verify Your Email Address</h1>
+    <p>Hello {{ user.first_name }},</p>
+
+    <p>Thank you for registering. Please verify your email by clicking the button below:</p>
+
+    <p><a href="{{ verification_url }}" class="button">Verify Email</a></p>
+
+    <p>If the button doesn't work, copy and paste this link:</p>
+    <p>{{ verification_url }}</p>
+
+    <p>Best regards,<br>The Team</p>
+</body>
+</html>

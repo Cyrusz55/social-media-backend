@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, render_template_string, url_for, render_template
 from flask_restx import Api, Resource, fields, reqparse
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.exc import IntegrityError
@@ -15,6 +15,11 @@ import uuid
 import logging
 import stripe
 from dotenv import load_dotenv
+import re
+import secrets
+from flask_mail import Mail, Message
+from threading import Thread
+
 
 
 load_dotenv()
@@ -27,7 +32,7 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='templates')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URI', 'sqlite:///' + os.path.join(basedir, 'social_media.db'))
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'dev-secret-key')
@@ -41,6 +46,7 @@ stripe.api_key=os.environ.get('STRIPE_SECRET_KEY', 'sk_test_your_key')
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 jwt = JWTManager(app)
+mail = Mail(app)
 cors = CORS(app)
 limiter = Limiter(
     get_remote_address,
@@ -64,7 +70,7 @@ authorizations = {
 }
 api.authorizations = authorizations
 
-#define namespaces
+# define namespaces
 auth_ns = api.namespace('auth', description='User operations')
 users_ns = api.namespace('users', description = 'profile operations and relationship management')
 posts_ns = api.namespace('posts', description = 'creation, retrieval and interaction with content')
@@ -236,7 +242,7 @@ class Like(db.model):
 class Notification(db.model):
     __tablename__ = 'Notifications'
 
-    id =  db.Column(db.Integer, primary_key = True)
+    id = db.Column(db.Integer, primary_key = True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False) # user who receive the notification
     actor_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable = False) # User who caused the notification
     notification_type = db.Column(db.String(50), nullable = False) # type of notification like, comment, follow
@@ -291,3 +297,196 @@ class MediaFile(db.model):
     def __repr__(self):
         return f"<MediaFile id={self.id} filename{self.filename} media_type = {self.media_type} user_id = {self.user_id}>"
 
+
+# Blacklisted token model for JWT management
+class BlacklistedToken(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    jti = db.Column(db.String(36), nullable=False, unique=True)
+    token_type = db.Column(db.String(10), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    blacklisted_on = db.Column(db.DateTime, nullable=False, default=datetime.now(timezone.utc))
+    expires = db.Column(db.DateTime, nullable=False)
+
+    def __repr__(self):
+        return f'<BlacklistedToken: {self.token_type}>'
+
+
+# Helper functions for validation
+def validate_email(email):
+    """Validate email format"""
+    email_pattern = re.compile(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$')
+    return bool(email_pattern.match(email))
+
+
+def validate_password(password):
+    """Validate password strength"""
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters long"
+
+    if not any(char.isdigit() for char in password):
+        return False, "Password must contain at least one digit"
+
+    if not any(char.isupper() for char in password):
+        return False, "Password must contain at least one uppercase letter"
+
+    if not any(char.islower() for char in password):
+        return False, "Password must contain at least one lowercase letter"
+
+    return True, "Password is valid"
+
+
+def is_token_blacklisted(jti):
+    """Check if token is blacklisted"""
+    return BlacklistedToken.query.filter_by(jti=jti).first() is not None
+
+# definition of email utility functions
+def send_async_email(app, msg):
+    with app.app_conext():
+        mail.send(msg)
+
+def send_email(subject, recipients, html_body, text_body = None):
+    msg = Message(subject, recipient= recipients)
+    msg.html = html_body
+    if text_body:
+        msg.body = text_body
+
+    Thread(target=send_async_email, args=(app, msg)).start()
+
+def send_verification_email(user):
+    verification_url = f"http://yourdomain.com/verify-email?token={user.verification_token}"
+
+    # Generate email content
+    subject = "Verify Your Email Address"
+    html_template = """
+        <!DOCTYPE html>
+        <html>
+        <body>
+            <h1>Verify Your Email</h1>
+            <p>Hello {{ name }},</p>
+            <p>Please click the link below to verify your email:</p>
+            <p><a href="{{ url }}">Verify Email</a></p>
+        </body>
+        </html>
+        """
+    html_body = render_template_string(
+        html_template,
+        name=user.first_name,
+        url=verification_url
+    )
+
+    text_body = f"""
+        Hello {user.first_name},
+
+        Please verify your email by clicking this link:
+        {verification_url}
+        """
+    send_email(
+        subject=subject,
+        recipients=[user.email],
+        html_body=html_body,
+        text_body=text_body
+    )
+def send_password_reset_email(user):
+    """Send password reset email to user."""
+    reset_url = url_for(
+        'auth_ns.password_reset',
+        token=user.reset_token,
+        _external=True
+    )
+    # Generate email content
+    subject = "Reset Your Password"
+    html_body = render_template(
+        'emails/reset_password.html',
+        user=user,
+        reset_url=reset_url
+    )
+    text_body = render_template(
+        'emails/reset_password.txt',
+        user=user,
+        reset_url=reset_url
+    )
+
+    send_email(
+        subject=subject,
+        recipients=[user.email],
+        html_body=html_body,
+        text_body=text_body
+    )
+
+token_model = auth_ns.model('Token',{
+    'access_token': fields.String(description = 'JWT access token'),
+    'refresh_token': fields.String(description = 'JWT refresh token'),
+    'token_type': fields.String(default = 'Bearer', description = 'Token type'),
+    'expires_in': fields.Integer(description = 'Token expiration time in seconds')
+
+
+})
+
+login_model = auth_ns.model('Login', {
+    'username': fields.String(required=True, description = 'Username or email'),
+    'password': fields.String(required = True, description = 'Password'),
+
+})
+
+register_model = auth_ns.model('Register',{
+    'username': fields.String(required = True, description = 'Username'),
+    'email': fields.String(required = True, description = 'Email address'),
+    'password': fields.String(required = True, description =  'password'),
+    'first_name': fields.String(required = False, description = 'First name'),
+    'last_name': fields.String(required = False, description = 'Last name'),
+})
+password_reset_request_model = auth_ns.model('PasswordResetRequest',{
+    'email': fields.String(required=True, description = 'Email address')
+})
+
+password_reset_model = auth_ns.model('PasswordReset',{
+    'token': fields.String(required = True, description = 'Email address'),
+    'new_password': fields.String(required=True, description = 'New password')
+})
+
+email_verification_model = auth_ns.model('EmailVerification', {
+    'token': fields.String(required = True, description = 'Email Verification token')
+
+})
+
+@auth_ns.route('/register')
+class RegisterUser(Resource):
+    @auth_ns.expect(register_model, validate = True)
+    def post(self):
+        """register a new user"""
+        data = request.json
+
+        if not validate_email(data['email']):
+            return{'message': 'Invalid email format'}, 400
+
+        valid_password, msg = validate_password(data['password'])
+        if not valid_password:
+            return {'message': msg}, 400
+
+        # check if user already exists
+        if User.query.filter_by(username=data['username']).first():
+            return {'message': 'Email already regisrered'}, 409
+
+        # Create a nrw user
+        new_user = User(
+            username = data['username'],
+            email = data['email'],
+            first_name = data['first_name'],
+            last_name = data.get('last_name', ''),
+            verification_token = secrets.token_urlsafe(32)
+        )
+        new_user.set_password(data['password'])
+
+        try:
+            db.session.add(new_user)
+            db.session.commit()
+
+            send_verification_email(new_user)
+
+            return{
+                'message': 'User registered successfully. Please check your email to verify account.',
+                'user_id': new_user.id
+            }, 201
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
