@@ -2428,3 +2428,297 @@ class SavedPost(db.Model):
 
     def __repr__(self):
         return f"<SavedPost user_id={self.user_id} post_id={self.post_id}>"
+
+# Models for API documentation and response marshalling
+comment_model = comments_ns.model('Comment', {
+    'id': fields.Integer(readonly=True),
+    'content': fields.String(required=True),
+    'created_at': fields.DateTime(readonly=True),
+    'updated_at': fields.DateTime(readonly=True),
+    'user_id': fields.Integer(readonly=True),
+    'post_id': fields.Integer(readonly=True),
+    'author': fields.Nested(comments_ns.model('CommentAuthor', {
+        'id': fields.Integer(readonly=True),
+        'username': fields.String(readonly=True),
+        'profile_picture': fields.String(readonly=True)
+    }))
+})
+
+comments_list_model = comments_ns.model('CommentsList', {
+    'comments': fields.List(fields.Nested(comment_model)),
+    'total': fields.Integer,
+    'page': fields.Integer,
+    'pages': fields.Integer,
+    'per_page': fields.Integer
+})
+
+notification_model = notifications_ns.model('Notification', {
+    'id': fields.Integer(readonly=True),
+    'type': fields.String(readonly=True, description='Type of notification (like, comment, follow, etc.)'),
+    'is_read': fields.Boolean(readonly=True),
+    'created_at': fields.DateTime(readonly=True),
+    'source_id': fields.Integer(readonly=True, description='ID of the user who triggered the notification'),
+    'source_user': fields.Nested(notifications_ns.model('NotificationSourceUser', {
+        'id': fields.Integer(readonly=True),
+        'username': fields.String(readonly=True),
+        'profile_picture': fields.String(readonly=True)
+    })),
+    'post_id': fields.Integer(readonly=True, description='ID of the related post, if applicable'),
+    'comment_id': fields.Integer(readonly=True, description='ID of the related comment, if applicable')
+})
+
+notifications_list_model = notifications_ns.model('NotificationsList', {
+    'notifications': fields.List(fields.Nested(notification_model)),
+    'total': fields.Integer,
+    'page': fields.Integer,
+    'pages': fields.Integer,
+    'per_page': fields.Integer,
+    'unread_count': fields.Integer
+})
+
+
+@comments_ns.route('/posts/<int:post_id>/like')
+class LikePost(Resource):
+    @jwt_required()
+    def post(self, post_id):
+        """Like a post"""
+        current_user_id = get_jwt_identity()
+        post = Post.query.get_or_404(post_id)
+
+        # Check visibility permissions
+        author = User.query.get(post.user_id)
+
+        # Check if post is private
+        if post.visibility == 'private' and current_user_id != author.id:
+            return {'message': 'This post is private'}, 403
+
+        # Check if post is followers-only
+        elif post.visibility == 'followers' and current_user_id != author.id:
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post is only visible to followers'}, 403
+
+        # Check if author profile is private
+        if author.is_private and current_user_id != author.id:
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post belongs to a private account'}, 403
+
+        # Check if already liked
+        existing_like = Like.query.filter_by(user_id=current_user_id, post_id=post_id).first()
+        if existing_like:
+            return {'message': 'Post already liked'}, 409
+
+        try:
+            # Create like record
+            like = Like(user_id=current_user_id, post_id=post_id)
+            db.session.add(like)
+
+            # Create notification for post author (if not self-like)
+            if current_user_id != author.id:
+                notification = Notification(
+                    user_id=post.user_id,
+                    source_id=current_user_id,
+                    type='like',
+                    post_id=post_id
+                )
+                db.session.add(notification)
+
+            db.session.commit()
+            return {'message': 'Post liked successfully'}, 200
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+
+@comments_ns.route('/posts/<int:post_id>/unlike')
+class UnlikePost(Resource):
+    @jwt_required()
+    def post(self, post_id):
+        """Unlike a post"""
+        current_user_id = get_jwt_identity()
+
+        # Check if liked
+        like = Like.query.filter_by(user_id=current_user_id, post_id=post_id).first()
+        if not like:
+            return {'message': 'Post not liked'}, 400
+
+        try:
+            # Remove like record
+            db.session.delete(like)
+
+            # Remove the associated notification (optional)
+            # Only if you want to remove notifications when unliking
+            post = Post.query.get(post_id)
+            if post and current_user_id != post.user_id:
+                notification = Notification.query.filter_by(
+                    user_id=post.user_id,
+                    source_id=current_user_id,
+                    type='like',
+                    post_id=post_id
+                ).first()
+
+                if notification:
+                    db.session.delete(notification)
+
+            db.session.commit()
+            return {'message': 'Post unliked successfully'}, 200
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+
+comments_ns.route('/posts/<int:post_id>/comments')
+
+
+class PostComments(Resource):
+    @jwt_required(optional=True)
+    @comments_ns.doc(params={'page': 'Page number', 'per_page': 'Results per page'})
+    @comments_ns.marshal_with(comments_list_model)
+    def get(self, post_id):
+        """Get comments for a post"""
+        current_user_id = get_jwt_identity()
+        post = Post.query.get_or_404(post_id)
+
+        # Check visibility permissions
+        author = User.query.get(post.user_id)
+
+        # Check if post is private
+        if post.visibility == 'private' and current_user_id != author.id:
+            return {'message': 'This post is private'}, 403
+
+        # Check if post is followers-only
+        elif post.visibility == 'followers' and current_user_id != author.id:
+            if not current_user_id:
+                return {'message': 'This post is only visible to followers'}, 403
+
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post is only visible to followers'}, 403
+
+        # Check if author profile is private
+        if author.is_private and current_user_id != author.id:
+            if not current_user_id:
+                return {'message': 'This post belongs to a private account'}, 403
+
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post belongs to a private account'}, 403
+
+        # Get query parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+
+        # Get comments for the post
+        comments_query = Comment.query.filter_by(post_id=post_id).order_by(Comment.created_at.asc())
+
+        # Paginate results
+        pagination = comments_query.paginate(page=page, per_page=per_page)
+
+        results = []
+        for comment in pagination.items:
+            # Get author info
+            comment_author = User.query.get(comment.user_id)
+
+            results.append({
+                'id': comment.id,
+                'content': comment.content,
+                'created_at': comment.created_at,
+                'updated_at': comment.updated_at,
+                'user_id': comment.user_id,
+                'post_id': comment.post_id,
+                'author': {
+                    'id': comment_author.id,
+                    'username': comment_author.username,
+                    'profile_picture': comment_author.profile_picture
+                }
+            })
+
+        return {
+            'comments': results,
+            'total': pagination.total,
+            'page': pagination.page,
+            'pages': pagination.pages,
+            'per_page': pagination.per_page
+        }
+
+    @jwt_required()
+    @comments_ns.expect(comments_ns.model('NewComment', {
+        'content': fields.String(required=True, description='Comment content')
+    }))
+    @comments_ns.marshal_with(comment_model)
+    def post(self, post_id):
+        """Create a new comment on a post"""
+        current_user_id = get_jwt_identity()
+        post = Post.query.get_or_404(post_id)
+
+        # Check visibility permissions
+        author = User.query.get(post.user_id)
+
+        # Check if post is private
+        if post.visibility == 'private' and current_user_id != author.id:
+            return {'message': 'This post is private'}, 403
+
+        # Check if post is followers-only
+        elif post.visibility == 'followers' and current_user_id != author.id:
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post is only visible to followers'}, 403
+
+        # Check if author profile is private
+        if author.is_private and current_user_id != author.id:
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post belongs to a private account'}, 403
+
+        data = request.json
+        content = data.get('content')
+
+        if not content or not content.strip():
+            return {'message': 'Comment content is required'}, 400
+
+        try:
+            # Create comment
+            comment = Comment(
+                content=content.strip(),
+                user_id=current_user_id,
+                post_id=post_id
+            )
+            db.session.add(comment)
+
+            # Create notification for post author (if not self-comment)
+            if current_user_id != author.id:
+                notification = Notification(
+                    user_id=post.user_id,
+                    source_id=current_user_id,
+                    type='comment',
+                    post_id=post_id,
+                    comment_id=comment.id  # This will be set after commit
+                )
+                db.session.add(notification)
+
+            db.session.commit()
+
+            # If notification was created, update the comment_id
+            if current_user_id != author.id:
+                notification.comment_id = comment.id
+                db.session.commit()
+
+            comment_author = User.query.get(current_user_id)
+
+            return {
+                'id': comment.id,
+                'content': comment.content,
+                'created_at': comment.created_at,
+                'updated_at': comment.updated_at,
+                'user_id': comment.user_id,
+                'post_id': comment.post_id,
+                'author': {
+                    'id': comment_author.id,
+                    'username': comment_author.username,
+                    'profile_picture': comment_author.profile_picture
+                }
+            }, 201
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
