@@ -2568,9 +2568,9 @@ class UnlikePost(Resource):
             return {'message': f'An error occurred: {str(e)}'}, 500
 
 
+
+
 comments_ns.route('/posts/<int:post_id>/comments')
-
-
 class PostComments(Resource):
     @jwt_required(optional=True)
     @comments_ns.doc(params={'page': 'Page number', 'per_page': 'Results per page'})
@@ -2722,3 +2722,273 @@ class PostComments(Resource):
         except Exception as e:
             db.session.rollback()
             return {'message': f'An error occurred: {str(e)}'}, 500
+@comments_ns.route('/comments/<int:comment_id>')
+class CommentResource(Resource):
+    @jwt_required()
+    @comments_ns.expect(comments_ns.model('UpdateComment',{
+        'content': fields.String(required=True, description='Updated comment content')
+    }))
+    @comments_ns.marshal_with(comment_model)
+    def put(self, comment_id):
+        """update a comment"""
+        current_user_id = get_jwt_identity()
+        comment = Comment.query.get_or_404(comment_id)
+
+        if comment.user_id != current_user_id:
+            return {'message': 'Not authoriszed to update this comment'}, 403
+
+        data = request.json
+        content = data.get('content')
+
+        if not content or not content.strip():
+            return {'message': 'Comment content is required'}, 400
+
+        try:
+            comment.content = content.strip()
+            comment.updated_at = datetime.now(timezone.utc)
+            db.session.commit()
+
+            comment_author = User.query.get(current_user_id)
+
+            return{
+                'id': comment.id,
+                'content': comment.content,
+                'created_at': comment.created_at,
+                'updated_at': comment.updated_at,
+                'user_id': comment.user_id,
+                'post_id': comment.post_id,
+                'author': {
+                    'id': comment_author.id,
+                    'username': comment_author.username,
+                    'profile_picture': comment_author.profile_picture
+                }
+            },200
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occured: {str(e)}'}, 500
+
+    @jwt_required()
+    def delete(self, comment_id):
+        """Delete a comment"""
+        current_user_id = get_jwt_identity()
+        comment = Comment.querry.get_or_404(comment_id)
+
+        # Check if the user is the comment author or the post owner
+        post = Post.query.get(comment.post_id)
+        if comment.user_id != current_user_id and post.user_id != current_user_id:
+            return {'message' : 'Not authorized to delete this comment'}, 403
+
+        try:
+            # Delete related notifications
+            notifications = Notification.query.filter_by(comment_id=comment_id).all()
+            for notification in notifications:
+                db.session.delete(notification)
+
+                # delete the comment
+                db.session.delete(comment)
+                db.session.commit()
+
+                return {'message': 'Comment deleted successfully'}, 200
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+
+# Content sharing
+
+@comments_ns.route('/posts/<int:post_id>/share')
+class SharePost(Resource):
+    @jwt_required()
+    @comments_ns.expect(comments_ns.model('SharePost',{
+        'content': fields.String(description = 'Additional content for the shared post'),
+        'visibility': fields.String(description = 'Visibility of the shared post', enum=['public', 'followers', 'private'])
+    }))
+    def post(self, post_id):
+        """Share a post (create a new post that references the original)"""
+        current_user_id = get_jwt_identity()
+        original_post = Post.query.get_or_404(post_id)
+
+        #check visibility permission
+        author = User.query.get(original_post.user_id)
+
+        if original_post.visibility == 'private' and current_user_id != author.id:
+            return {'message': 'This post is private and cannot be shared'}, 403
+
+        # Check if post is followers only
+        elif original_post.visibility == 'followers' and current_user_id != author.id:
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return {'message': 'This post is only visible to followers and cannot be shared'}, 403
+
+        # Check if author profile is private
+        if author.is_private and current_user_id != author.id:
+            current_user = User.query.get(current_user_id)
+            if not current_user or not current_user.is_following(author):
+                return{'message': 'This post belongs to a private account and cannot be shared'}, 403
+
+        data = request.json or {}
+        content = data.get('content', '')
+        visibility = data.get('visibility', 'public')
+
+        if visibility not in ['public', 'followers', 'private']:
+            return {'message': 'invalid visibility option'}, 400
+
+        try:
+            shared_post = Post(
+                content = content,
+                user_id=current_user_id,
+                visibility=visibility,
+                shared_from=post_id
+            )
+            db.session.add(shared_post)
+
+            # Create notification for original post author (if not self-share)
+            if current_user_id != author.id:
+                notification = Notification(
+                    user_id=original_post.user_id,
+                    source_id=current_user_id,
+                    type='share',
+                    post_id = post_id
+                )
+                db.session.add(notification)
+
+            db.session.commit()
+
+            return{
+                'message': 'Post shared successfully',
+                'post_id': shared_post.id
+            }, 201
+        except Exception as e:
+            db.session.rollback()
+            return{'message': f'An error occured: {str(e)}'}, 500
+
+
+@comments_ns.route('/posts/<int:post_id>/is_saved')
+class IsPostSaved(Resource):
+    @jwt_required()
+    def get(self, post_id):
+        """Check if a post is saved by the current user"""
+        current_user_id = get_jwt_identity()
+
+        saved_post = SavedPost.query.filter_by(user_id = current_user_id, post_id=post_id).first()
+
+        return{
+            'is_saved': saved_post is not None
+        }, 200
+
+
+@comments_ns.route('/')
+class NotificationList(Resource):
+    @jwt_required()
+    @notifications_ns.doc(params={
+        'page': 'Page number',
+        'per_page': 'Results per page',
+        'unread_only': 'Filter to show only unreard notifications'
+    })
+    @notifications_ns.marshal_with(notifications_list_model)
+    def get(self):
+        """Get current user's notifications"""
+        current_user_id = get_jwt_identity()
+
+        # Get query parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+        unread_only = request.args.get('unread_only', False, type=lambda v: v.lower() == 'true')
+
+        # Build the query
+        query = Notification.query.filter_by(user_id=current_user_id)
+
+        # Filter unread if requested
+        if unread_only:
+            query = query.filter_by(is_read=False)
+
+        query = query.order_by(Notification.created_at.desc())
+
+        pagination = query.paginate(page=page, per_page=per_page)
+
+        unread_count = Notification.query.filter_by(user_id = current_user_id, is_read=False).count()
+
+        results = []
+        for notification in pagination.items:
+
+            source_user = User.query.get(notification.source_id) if notification.source_id else None
+
+            results.append({
+                'id': notification.id,
+                'type': notification.type,
+                'is_read': notification.is_read,
+                'created_at': notification.created_at,
+                'source_id': notification.source_id,
+                'source_user': {
+                    'id': source_user.id,
+                    'username': source_user.username,
+                    'profile_picture': source_user.profile_picture
+                } if source_user else None,
+                'post_id': notification.post_id,
+                'comment_id': notification.comment_id
+
+            })
+        return {
+            'notifications': results,
+            'total': pagination.total,
+            'page': pagination.page,
+            'per_page': pagination.per_page,
+            'unread_count': unread_count
+        }
+notifications_ns.route('/mark_read')
+class MarkNotificationsRead(Resource):
+    @jwt_required()
+    @notifications_ns.expect(notifications_ns.model('MarkRead',{
+        'notification_ids': fields.List(fields.Integer, description='List of notification IDs to mark as read'),
+        'mark_all': fields.Boolean(description='Mark all notification as read', default = False)
+    }))
+    def post(self):
+        """Mark notifications as read"""
+        current_user_id = get_jwt_identity()
+        data = request.json or {}
+
+        notification_ids = data.get('notification_ids', [])
+        mark_all = data.get('mark_all', False)
+
+        try:
+            if mark_all:
+
+                Notification.query.filter_by(
+                    user_id = current_user_id,
+                    is_read = False
+                ).update({'is_read': True})
+
+                db.session.commit()
+                return {'message': 'All notifications marked as read'}, 200
+            elif notification_ids:
+
+                Notification.query.filter(
+                    Notification.id.in_(notification_ids),
+                    Notification.user_id == current_user_id
+                ).update({'is_read': True}, synchronize_session=False)
+
+                db.session.commit()
+                return {'message': f'{len(notification_ids)} notifications marked as read'}, 200
+            else:
+                return{'message': 'No notifications specified'}, 400
+        except Exception as e:
+            db.session.rollback()
+            return {'message': f'An error occurred: {str(e)}'}, 500
+
+@notifications_ns.route('/unread_count')
+class UnreadNotificationCount(Resource):
+    @jwt_required()
+    def get(self):
+        """Get count of unread notifications"""
+        current_user_id = get_jwt_identity()
+
+        unread_count = Notification.query.filter_by(
+            user_id=current_user_id,
+            is_read=False
+        ).count()
+
+        return {'unread_count': unread_count}, 200
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
