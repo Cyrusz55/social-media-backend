@@ -127,9 +127,9 @@ class User(db.Model):
         last_login = db.Column(db.DateTime(timezone=True), nullable = True)
 
         # profile
-        profile_picture = db.column(db.String(255), nullable = True)
-        bio = db.Column(db.text, nullable=True)
-        location = db.column(db.String(100), nullable=True)
+        profile_picture = db.Column(db.String(255), nullable = True)
+        bio = db.Column(db.Text, nullable=True)
+        location = db.Column(db.String(100), nullable=True)
         website = db.Column(db.String(200), nullable = True)
 
         # Privacy settings
@@ -147,8 +147,8 @@ class User(db.Model):
 
         # relationships
 
-        posts = db.relationship('Post', backref='author', lazy='dynamic', cascade='all, delete_orphan')
-        comments = db.relationship('Comment', backref='author', lazy='dynamic', cascade='all, delete_orphan')
+        posts = db.relationship('Post', backref='author', lazy='dynamic', cascade='all, delete-orphan')
+        comments = db.relationship('Comment', backref='author', lazy='dynamic', cascade='all, delete-orphan')
         likes = db.relationship('Like', backref='user', lazy='dynamic', cascade='all, delete-orphan')
 
         following = db.relationship(
@@ -187,11 +187,11 @@ class User(db.Model):
         def is_following(self, user):
             """Checking if following a user is True"""
             return self.following.filter(followers.c.followed_id == user.id).count() > 0
-class Post(db.model):
-    id = db.Column(db.integer, primary_key=True)
+class Post(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
     content = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at = db.column(db.DateTime(timezone=True),onupdate = lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime(timezone=True),onupdate = lambda: datetime.now(timezone.utc))
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
     media_url = db.Column(db.String(255), nullable=True)
@@ -201,14 +201,14 @@ class Post(db.model):
     likes = db.relationship('like', backref='post', lazy='dynamic', cascade='all, delete-orphan')
     comments = db.relationship('comment', backref='post', lazy='dynamic', cascade='all, delete-orphan')
 
-class Comment(db.model):
+class Comment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     content = db.Column(db.Text, nullable = False)
     created_at = db.Column(db.DateTime(timezone = True), default = lambda: datetime.now(timezone.utc))
-    user_id = db.Column(db.Ineger,db.ForeignKey('user.id'), nullable=False)
+    user_id = db.Column(db.Integer,db.ForeignKey('user.id'), nullable=False)
     post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable = False)
 
-class Relationship(db.model):
+class Relationship(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     follower_id= db.Column(db.Integer, db.ForeignKey('user.id'), nullable = False)
     followed_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable = False)
@@ -222,7 +222,7 @@ class Relationship(db.model):
     def __repr__(self):
         return f"<Relationship follower_id = {self.follower_id} followed_id={self.followed_id} status = {self.status}>"
 
-class Like(db.model):
+class Like(db.Model):
     id = db.Column(db.Integer, primary_key = True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable = False) # the user who likes the post
     post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable = False) # the post that was liked
@@ -240,7 +240,7 @@ class Like(db.model):
     def __repr__(self):
         return f"Like user_id={self.user_id} post_id={self.post_id} timestamp={self.timestamp}>"
 
-class Notification(db.model):
+class Notification(db.Model):
     __tablename__ = 'Notifications'
 
     id = db.Column(db.Integer, primary_key = True)
@@ -261,7 +261,7 @@ class Notification(db.model):
         return f"<Notification id={self.id} user_id{self.user_id} type = {self.notification_type} read = {self.is_read}>"
 
 
-class Message(db.model):
+class Message(db.Model):
     id = db.Column(db.Integer, primary_key = True)
     sender_id = db.Column(db.Integer, db.ForeignKey('user.id'),nullable = False)
     recipient_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
@@ -277,7 +277,7 @@ class Message(db.model):
     def __repr__(self):
         return f"<Message id ={self.id} sender_id = {self.sender_id} recipient_id = {self.recipiemt_id} read = {self.is_read}>"
 
-class MediaFile(db.model):
+class MediaFile(db.Model):
     id = db.Column(db.Integer, primary_key = True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable = False)
     post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable = True)
@@ -2990,5 +2990,5 @@ class UnreadNotificationCount(Resource):
         return {'unread_count': unread_count}, 200
 
 
-if __name__ == '__main__':
-    app.run(debug=True)
+if __name__ =='__main__':
+    app.run(debug = True)
