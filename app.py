@@ -20,7 +20,10 @@ import secrets
 from flask_mail import Mail, Message
 from threading import Thread
 from sqlalchemy import func
-
+from sqlalchemy import Table, Column, Integer, ForeignKey, desc, or_, and_
+from sqlalchemy.orm import relationship, joinedload
+from PIL import Image
+from werkzeug.exceptions import NotFound, Forbidden, BadRequest
 
 
 load_dotenv()
@@ -2988,6 +2991,80 @@ class UnreadNotificationCount(Resource):
         ).count()
 
         return {'unread_count': unread_count}, 200
+
+conversation_participants = Table(
+    'conversation_participants',
+    db.Model.metadata,
+    Column('conversation_id', Integer, ForeignKey('converation.id'), primary_key=True),
+    Column('user_id', Integer, ForeignKey('user.id'), primary_key=True)
+)
+
+class Conversation(db.Model):
+    id = db.Column(db.Integer, primary_key = True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.now)
+    last_message_id = db.Column(db.Integer, db.ForeignKey('message.id'), nullable=True)
+
+    # Relationship
+    participants = relationship('User', secondary = conversation_participants, backref = 'conversations')
+    messages = relationship('Message', back_populates='conversion', cascade='all, delete-orphan')
+    last_message = relationship('Message', foreign_keys=[last_message_id])
+
+class Message(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    content = db.Column(db.Text, nullable = True)
+    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    is_read = db.Column(db.Boolean, default=False)
+    media_url = db.Column(db.String(255), nullable=True)
+    media_type = db.Column(db.String(50), nullable = True)
+
+    sender = relationship('USer', backref='sent_messages')
+    conversation = relationship('Conversation', back_populates='messages')
+
+class Report(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    reporter_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    reported_user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    reported_post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable=True)
+    reported_comment_id = db.Column(db.Integer, db.ForeignKey('comment.id'), nullable=True)
+    reason = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(20), default='pending')
+    created_at = db.Column(db.DateTime, default = datetime.utcnow)
+    admin_notes = db.Column(db.Text, nullable=True)
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    reviewed_at = db.Column(db.DateTime, nullable=True)
+
+    # relationships
+    reporter = relationship('User', foreign_keys = [reporter_id])
+    reported_user = relationship('User', foreign_keys=[reported_user_id])
+    reported_post = relationship('Post', foreign_keys=[reported_comment_id])
+    reviewer = relationship('User', foreign_keys=[reviewed_by])
+
+
+class BlockedUser(db.Model):
+    __tablename__ = 'blocked_users'
+    blocker_id = db.Column(db.Integer, db.ForeignKey('user.id'), primary_key=True)
+    blocked_id = db.Column(db.Integer, db.ForeignKey('USer.id'), primary_key=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    blocker = relationship('User', foreign_keys=[blocker_id])
+    blocked = relationship('User', foreign_keys=[blocked_id])
+
+class Media(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    filename = db.Column(db.String(255), nullable=False)
+    original_name = db.Column(db.String(255), nullable=False)
+    file_path = db.Column(db.String(500), nullable = False)
+    file_size = db.Column(db.Integer, nullable = False)
+    media_type = db.Column(db.String(50), nullable = False)
+    mime_type = db.Column(db.String(100), nullable=False)
+    uploaded_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    thumbnail_path = db.Column(db.String(500), nullable = True)
+
+    uploader = relationship('User', backref='uploaded_media')
 
 
 if __name__ =='__main__':
