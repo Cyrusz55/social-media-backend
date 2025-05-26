@@ -24,6 +24,7 @@ from sqlalchemy import Table, Column, Integer, ForeignKey, desc, or_, and_
 from sqlalchemy.orm import relationship, joinedload
 from PIL import Image
 from werkzeug.exceptions import NotFound, Forbidden, BadRequest
+from flask_migrate import Migrate
 
 
 load_dotenv()
@@ -36,6 +37,8 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
+
+
 app = Flask(__name__, template_folder='templates')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URI', 'sqlite:///' + os.path.join(basedir, 'social_media.db'))
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -44,6 +47,16 @@ app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)
 app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=30)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+
+def configure_upload_settings(app):
+    app.config['UPLOAD_FOLDER'] = app.config.get('UPLOAD_FOLDER', 'uploads')
+    app.config['MAX_CONTENT_LENGTH'] = app.config.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024)
+    upload_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'media')
+    os.makedirs(upload_dir, exist_ok=True)
+
+configure_upload_settings(app)
+
+
 
 stripe.api_key=os.environ.get('STRIPE_SECRET_KEY', 'sk_test_your_key')
 

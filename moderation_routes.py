@@ -3,7 +3,7 @@ from flask_restx import Namespace, Resource, fields
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime
 from app import User, db,BadRequest, Comment
-from app import Report, joinedload, desc
+from app import Report, joinedload, desc, Forbidden, NotFound, BlockedUser
 
 moderation_ns = Namespace('moderation', dscription='Moderation to ensure reporting content and blocking users is possible')
 
@@ -71,64 +71,65 @@ class ReportListAPI(Resource):
 
             return reports.items
 
-@jwt_required()
-@moderation_ns.expect(create_report_model)
-@moderation_ns.marshal_with(report_model)
-def post(self):
-    """Create a new report"""
-    current_user_id = get_jwt_identity()
-    data = request.get_json()
+    @jwt_required()
+    @moderation_ns.expect(create_report_model)
+    @moderation_ns.marshal_with(report_model)
+    def post(self):
+        """Create a new report"""
+        current_user_id = get_jwt_identity()
+        data = request.get_json()
 
-    reported_user_id = data.get('reported_user_id')
-    reported_post_id = data.get('reported_post_id')
-    reported_comment_id = data.get('reported_comment_id')
-    reason = data.get('reason', '').strip()
+        reported_user_id = data.get('reported_user_id')
+        reported_post_id = data.get('reported_post_id')
+        reported_comment_id = data.get('reported_comment_id')
+        reason = data.get('reason', '').strip()
+        description = data.get('description', '').strip()
 
-    if not reason:
-        raise BadRequest("Reason is required")
+        if not reason:
+            raise BadRequest("Reason is required")
 
-    if not any([reported_user_id, reported_post_id, reported_comment_id]):
-        raise BadRequest("Must specify what to report")
+        if not any([reported_user_id, reported_post_id, reported_comment_id]):
+            raise BadRequest("Must specify what to report")
 
-    if reported_user_id:
-        user = User.query.get(reported_user_id)
-        if not user:
-            raise BadRequest('cannot report yourself')
-        if user.id == current_user_id:
-            raise BadRequest("Reported post not found")
+        if reported_user_id:
+            user = User.query.get(reported_user_id)
+            if not user:
+                raise BadRequest('cannot report yourself')
+            if user.id == current_user_id:
+                raise BadRequest("Reported post not found")
 
-        if reported_comment_id:
-            comment = Comment.query.get(reported_comment_id)
-            if not comment:
-                raise BadRequest("reported comment not found")
+            if reported_comment_id:
+                comment = Comment.query.get(reported_comment_id)
+                if not comment:
+                    raise BadRequest("reported comment not found")
 
-        existing_report = Report.query.filter(
-            Report.reporter+id == current_user_id,
-            Report.reported_user_id == reported_user_id,
-            Report.reported_post_id == reported_post_id,
-            Report.reported_comment_id == reported_comment_id,
-            Report.status.in_(['pending', 'reviewed'])
-        ).first()
+            existing_report = Report.query.filter(
+                Report.reporter+id == current_user_id,
+                Report.reported_user_id == reported_user_id,
+                Report.reported_post_id == reported_post_id,
+                Report.reported_comment_id == reported_comment_id,
+                Report.status.in_(['pending', 'reviewed'])
+            ).first()
 
-        if existing_report:
-            raise BadRequest("You have already reported this")
+            if existing_report:
+                raise BadRequest("You have already reported this")
 
-        try:
-            report = Report(
-                reporter_id = current_user_id,
-                reported_user_id = reported_user_id,
-                reported_post_id = reported_post_id,
-                reported_comment_id = reported_comment_id,
-                reason = reason,
-                description = description
-            )
-            db.session.add(report)
-            db.session.commit()
+            try:
+                report = Report(
+                    reporter_id = current_user_id,
+                    reported_user_id = reported_user_id,
+                    reported_post_id = reported_post_id,
+                    reported_comment_id = reported_comment_id,
+                    reason = reason,
+                    description = description
+                )
+                db.session.add(report)
+                db.session.commit()
 
-            return report
-        except Exception as e:
-            db.session.rollback()
-            raise BadRequest(f'failed to create report: {str(e)}')
+                return report
+            except Exception as e:
+                db.session.rollback()
+                raise BadRequest(f'failed to create report: {str(e)}')
 
 
 @moderation_ns.route('/reports/<int:report_id>')
@@ -258,6 +259,26 @@ class UnblockUserAPI(Resource):
             raise BadRequest(f"Failed to unblock user: {str(e)}")
 
 
+@moderation_ns.route('/blocked-users')
+class BlockedUsersListAPI(Resource):
+    @jwt_required()
+    def get(self):
+        """Get list of blocked users"""
+        current_user_id = get_jwt_identity()
+
+        blocked_users = db.session.query(BlockedUser, User).join(
+            User, BlockedUser.blocked_id == User.id
+        ).filter(BlockedUser.blocker_id == current_user_id).all()
+
+        result = []
+        for block, user in blocked_users:
+            result.append({
+                'user_id': user.id,
+                'username': user.username,
+                'blocked_at': block.created_at
+            })
+
+        return result
 @moderation_ns.route('/blocked-users')
 class BlockedUsersListAPI(Resource):
     @jwt_required()
