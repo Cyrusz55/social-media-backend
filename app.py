@@ -3023,7 +3023,7 @@ class Conversation(db.Model):
     messages = relationship('Message', back_populates='conversion', cascade='all, delete-orphan')
     last_message = relationship('Message', foreign_keys=[last_message_id])
 
-class Message(db.Model):
+"""class Message(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     content = db.Column(db.Text, nullable = True)
     sender_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
@@ -3034,6 +3034,7 @@ class Message(db.Model):
 
     sender = relationship('USer', backref='sent_messages')
     conversation = relationship('Conversation', back_populates='messages')
+    """
 
 class Report(db.Model):
     id = db.Column(db.Integer, primary_key=True)
