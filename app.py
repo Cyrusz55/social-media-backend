@@ -212,10 +212,11 @@ class Post(db.Model):
 
     media_url = db.Column(db.String(255), nullable=True)
     media_type = db.Column(db.String(20), default='public')
-
+    shared_from = db.Column(db.Integer, db.ForeignKey('post.id'), nullable=True)
     # Relationships
     likes = db.relationship('like', backref='post', lazy='dynamic', cascade='all, delete-orphan')
     comments = db.relationship('comment', backref='post', lazy='dynamic', cascade='all, delete-orphan')
+    shared_post = relationship('Post', remote_side=[id], backref='shares')
 
 class Comment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -291,7 +292,7 @@ class Message(db.Model):
 
 
     def __repr__(self):
-        return f"<Message id ={self.id} sender_id = {self.sender_id} recipient_id = {self.recipiemt_id} read = {self.is_read}>"
+        return f"<Message id ={self.id} sender_id = {self.sender_id} recipient_id = {self.recipient_id} read = {self.is_read}>"
 
 class MediaFile(db.Model):
     id = db.Column(db.Integer, primary_key = True)
@@ -358,7 +359,7 @@ def is_token_blacklisted(jti):
 
 # definition of email utility functions
 def send_async_email(app, msg):
-    with app.app_conext():
+    with app.app_context():
         mail.send(msg)
 
 def send_email(subject, recipients, html_body, text_body = None):
@@ -482,7 +483,7 @@ class RegisterUser(Resource):
 
         # check if user already exists
         if User.query.filter_by(username=data['username']).first():
-            return {'message': 'Email already regisrered'}, 409
+            return {'message': 'Email already registered'}, 409
 
         # Create a nrw user
         new_user = User(
@@ -510,7 +511,7 @@ class RegisterUser(Resource):
 
 # profile model for the API
 profile_model = users_ns.model('UserProfile', {
-    'Username': fields.String(description='Username'),
+    'username': fields.String(description='Username'),
     'first_name': fields.String(description = 'First name'),
     'last_name': fields.String(description = 'Last name', required=False),
     'bio': fields.String(description = 'User biography', required=False),
@@ -2473,7 +2474,7 @@ notification_model = notifications_ns.model('Notification', {
     'type': fields.String(readonly=True, description='Type of notification (like, comment, follow, etc.)'),
     'is_read': fields.Boolean(readonly=True),
     'created_at': fields.DateTime(readonly=True),
-    'source_id': fields.Integer(readonly=True, description='ID of the user who triggered the notification'),
+    'source_id': fields.Integer(readonly=True, attribute='actor_id', description='ID of the user who triggered the notification'),
     'source_user': fields.Nested(notifications_ns.model('NotificationSourceUser', {
         'id': fields.Integer(readonly=True),
         'username': fields.String(readonly=True),
@@ -2491,60 +2492,6 @@ notifications_list_model = notifications_ns.model('NotificationsList', {
     'per_page': fields.Integer,
     'unread_count': fields.Integer
 })
-
-
-@comments_ns.route('/posts/<int:post_id>/like')
-class LikePost(Resource):
-    @jwt_required()
-    def post(self, post_id):
-        """Like a post"""
-        current_user_id = get_jwt_identity()
-        post = Post.query.get_or_404(post_id)
-
-        # Check visibility permissions
-        author = User.query.get(post.user_id)
-
-        # Check if post is private
-        if post.visibility == 'private' and current_user_id != author.id:
-            return {'message': 'This post is private'}, 403
-
-        # Check if post is followers-only
-        elif post.visibility == 'followers' and current_user_id != author.id:
-            current_user = User.query.get(current_user_id)
-            if not current_user or not current_user.is_following(author):
-                return {'message': 'This post is only visible to followers'}, 403
-
-        # Check if author profile is private
-        if author.is_private and current_user_id != author.id:
-            current_user = User.query.get(current_user_id)
-            if not current_user or not current_user.is_following(author):
-                return {'message': 'This post belongs to a private account'}, 403
-
-        # Check if already liked
-        existing_like = Like.query.filter_by(user_id=current_user_id, post_id=post_id).first()
-        if existing_like:
-            return {'message': 'Post already liked'}, 409
-
-        try:
-            # Create like record
-            like = Like(user_id=current_user_id, post_id=post_id)
-            db.session.add(like)
-
-            # Create notification for post author (if not self-like)
-            if current_user_id != author.id:
-                notification = Notification(
-                    user_id=post.user_id,
-                    source_id=current_user_id,
-                    type='like',
-                    post_id=post_id
-                )
-                db.session.add(notification)
-
-            db.session.commit()
-            return {'message': 'Post liked successfully'}, 200
-        except Exception as e:
-            db.session.rollback()
-            return {'message': f'An error occurred: {str(e)}'}, 500
 
 
 @comments_ns.route('/posts/<int:post_id>/unlike')
@@ -2787,7 +2734,7 @@ class CommentResource(Resource):
     def delete(self, comment_id):
         """Delete a comment"""
         current_user_id = get_jwt_identity()
-        comment = Comment.querry.get_or_404(comment_id)
+        comment = Comment.query.get_or_404(comment_id)
 
         # Check if the user is the comment author or the post owner
         post = Post.query.get(comment.post_id)
@@ -3008,7 +2955,7 @@ class UnreadNotificationCount(Resource):
 conversation_participants = Table(
     'conversation_participants',
     db.Model.metadata,
-    Column('conversation_id', Integer, ForeignKey('converation.id'), primary_key=True),
+    Column('conversation_id', Integer, ForeignKey('conversation.id'), primary_key=True),
     Column('user_id', Integer, ForeignKey('user.id'), primary_key=True)
 )
 
@@ -3023,18 +2970,7 @@ class Conversation(db.Model):
     messages = relationship('Message', back_populates='conversion', cascade='all, delete-orphan')
     last_message = relationship('Message', foreign_keys=[last_message_id])
 
-"""class Message(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    content = db.Column(db.Text, nullable = True)
-    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    is_read = db.Column(db.Boolean, default=False)
-    media_url = db.Column(db.String(255), nullable=True)
-    media_type = db.Column(db.String(50), nullable = True)
 
-    sender = relationship('USer', backref='sent_messages')
-    conversation = relationship('Conversation', back_populates='messages')
-    """
 
 class Report(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -3053,14 +2989,14 @@ class Report(db.Model):
     # relationships
     reporter = relationship('User', foreign_keys = [reporter_id])
     reported_user = relationship('User', foreign_keys=[reported_user_id])
-    reported_post = relationship('Post', foreign_keys=[reported_comment_id])
+    reported_post = relationship('Post', foreign_keys=[reported_post_id])
     reviewer = relationship('User', foreign_keys=[reviewed_by])
-
+    reported_comment = relationship('Comment', backref = 'reports')
 
 class BlockedUser(db.Model):
     __tablename__ = 'blocked_users'
     blocker_id = db.Column(db.Integer, db.ForeignKey('user.id'), primary_key=True)
-    blocked_id = db.Column(db.Integer, db.ForeignKey('USer.id'), primary_key=True)
+    blocked_id = db.Column(db.Integer, db.ForeignKey('user.id'), primary_key=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     blocker = relationship('User', foreign_keys=[blocker_id])
@@ -3079,6 +3015,8 @@ class Media(db.Model):
     thumbnail_path = db.Column(db.String(500), nullable = True)
 
     uploader = relationship('User', backref='uploaded_media')
+
+
 
 
 if __name__ =='__main__':
